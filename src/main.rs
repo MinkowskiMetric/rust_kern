@@ -4,14 +4,18 @@
 #![test_runner(rust_kern::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use rust_kern::println;
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    println!("Hello World{}", "!");
+entry_point!(kernel_main);
 
-    rust_kern::init();
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    println!("Starting kernel...");
+
+    rust_kern::early_init(boot_info);
+
+    x86_64::instructions::interrupts::int3();
 
     #[cfg(test)]
     test_main();
