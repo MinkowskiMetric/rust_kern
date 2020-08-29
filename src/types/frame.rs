@@ -1,5 +1,4 @@
-use crate::addr::PhysicalAddress;
-use crate::phys_alloc::page::{PageSize, Size4KiB};
+use crate::types::{PageSize, PhysicalAddress, Size4KiB};
 use core::{
     fmt,
     iter::Step,

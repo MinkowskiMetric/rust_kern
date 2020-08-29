@@ -10,17 +10,26 @@ use rust_kern::println;
 
 entry_point!(kernel_main);
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    println!("Starting kernel...");
-
-    rust_kern::early_init(boot_info);
-
-    x86_64::instructions::interrupts::int3();
-
-    #[cfg(test)]
+#[cfg(test)]
+fn run_tests() -> ! {
     test_main();
 
     loop {}
+}
+
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    println!("Starting kernel...");
+
+    #[cfg(test)]
+    rust_kern::init::start_cpu0(run_tests);
+
+    #[cfg(not(test))]
+    rust_kern::init::start_cpu0(rust_kern::init::idle_proc);
+    /*x86_64::instructions::interrupts::int3();
+
+    test_main();
+
+    loop {}*/
 }
 
 /// This function is called on panic.

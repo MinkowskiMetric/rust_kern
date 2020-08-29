@@ -4,6 +4,7 @@
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
 #![feature(custom_test_frameworks)]
+#![feature(never_type)]
 #![feature(step_trait)]
 #![feature(step_trait_ext)]
 #![test_runner(crate::test_runner)]
@@ -11,14 +12,15 @@
 
 extern crate rlibc;
 
-pub mod addr;
+pub mod mm;
+pub mod types;
 pub mod gdt;
+pub mod init;
 pub mod interrupts;
-pub mod phys_alloc;
+pub mod percpu;
 pub mod serial;
 pub mod vga_buffer;
 
-use bootloader::BootInfo;
 use core::panic::PanicInfo;
 
 pub trait Testable {
@@ -79,10 +81,4 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
     }
-}
-
-pub fn early_init(boot_info: &'static BootInfo) {
-    gdt::init();
-    interrupts::init_idt();
-    phys_alloc::early_init(boot_info);
 }

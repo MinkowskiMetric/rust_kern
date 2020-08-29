@@ -1,4 +1,4 @@
-use crate::addr::PhysicalAddress;
+use crate::types::PhysicalAddress;
 use bitflags::bitflags;
 use core::{
     fmt,
