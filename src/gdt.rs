@@ -1,55 +1,118 @@
-use lazy_static::lazy_static;
-use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
-use x86_64::structures::tss::TaskStateSegment;
-use x86_64::VirtAddr;
-use crate::per_cpu;
+use core::mem;
+use x86::dtables::{self, DescriptorTablePointer};
+use x86::segmentation::load_cs;
+use x86::segmentation::{self, Descriptor as SegmentDescriptor, SegmentSelector};
+use x86::Ring;
 
-per_cpu! {
-    static GDT: (GlobalDescriptorTable, Selectors) = {
-        let mut gdt = GlobalDescriptorTable::new();
-        let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
-        (
-            gdt,
-            Selectors {
-                code_selector,
-                tss_selector,
-            },
-        )
-    };
+#[derive(Copy, Clone, Debug)]
+#[repr(packed)]
+pub struct GdtEntry {
+    pub limitl: u16,
+    pub offsetl: u16,
+    pub offsetm: u8,
+    pub access: u8,
+    pub flags_limith: u8,
+    pub offseth: u8,
 }
 
-pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-
-per_cpu! {
-    static TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            // THIS IS WRONG!! This is defining a single stack which is used by all CPUs.
-            // It is safe for as long as there is only one CPU.
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-            let stack_start = VirtAddr::from_ptr(unsafe { &STACK });
-            let stack_end = stack_start + STACK_SIZE;
-            stack_end
-        };
-        tss
-    };
-}
-
-struct Selectors {
-    code_selector: SegmentSelector,
-    tss_selector: SegmentSelector,
-}
-
-pub fn init() {
-    use x86_64::instructions::segmentation::set_cs;
-    use x86_64::instructions::tables::load_tss;
-
-    GDT.0.load();
-    unsafe {
-        set_cs(GDT.1.code_selector);
-        load_tss(GDT.1.tss_selector);
+impl GdtEntry {
+    pub const fn new(offset: u32, limit: u32, access: u8, flags: u8) -> Self {
+        GdtEntry {
+            limitl: limit as u16,
+            offsetl: offset as u16,
+            offsetm: (offset >> 16) as u8,
+            access,
+            flags_limith: flags & 0xF0 | ((limit >> 16) as u8) & 0x0F,
+            offseth: (offset >> 24) as u8,
+        }
     }
+
+    pub fn set_offset(&mut self, offset: u32) {
+        self.offsetl = offset as u16;
+        self.offsetm = (offset >> 16) as u8;
+        self.offseth = (offset >> 24) as u8;
+    }
+
+    pub fn set_limit(&mut self, limit: u32) {
+        self.limitl = limit as u16;
+        self.flags_limith = self.flags_limith & 0xF0 | ((limit >> 16) as u8) & 0x0F;
+    }
+}
+
+pub const GDT_NULL: usize = 0;
+pub const GDT_KERNEL_CODE: usize = 1;
+pub const GDT_KERNEL_DATA: usize = 2;
+pub const GDT_KERNEL_TLS: usize = 3;
+pub const GDT_USER_CODE: usize = 4;
+pub const GDT_USER_DATA: usize = 5;
+pub const GDT_USER_TLS: usize = 6;
+pub const GDT_TSS: usize = 7;
+pub const GDT_TSS_HIGH: usize = 8;
+
+pub const GDT_A_PRESENT: u8 = 1 << 7;
+pub const GDT_A_RING_0: u8 = 0 << 5;
+pub const GDT_A_RING_1: u8 = 1 << 5;
+pub const GDT_A_RING_2: u8 = 2 << 5;
+pub const GDT_A_RING_3: u8 = 3 << 5;
+pub const GDT_A_SYSTEM: u8 = 1 << 4;
+pub const GDT_A_EXECUTABLE: u8 = 1 << 3;
+pub const GDT_A_CONFORMING: u8 = 1 << 2;
+pub const GDT_A_PRIVILEGE: u8 = 1 << 1;
+pub const GDT_A_DIRTY: u8 = 1;
+
+pub const GDT_A_TSS_AVAIL: u8 = 0x9;
+pub const GDT_A_TSS_BUSY: u8 = 0xB;
+
+pub const GDT_F_PAGE_SIZE: u8 = 1 << 7;
+pub const GDT_F_PROTECTED_MODE: u8 = 1 << 6;
+pub const GDT_F_LONG_MODE: u8 = 1 << 5;
+
+static mut INIT_GDTR: DescriptorTablePointer<SegmentDescriptor> = DescriptorTablePointer {
+    limit: 0,
+    base: 0 as *const SegmentDescriptor,
+};
+
+static mut INIT_GDT: [GdtEntry; 4] = [
+    // Null
+    GdtEntry::new(0, 0, 0, 0),
+    // Kernel code
+    GdtEntry::new(
+        0,
+        0,
+        GDT_A_PRESENT | GDT_A_RING_0 | GDT_A_SYSTEM | GDT_A_EXECUTABLE | GDT_A_PRIVILEGE,
+        GDT_F_LONG_MODE,
+    ),
+    // Kernel data
+    GdtEntry::new(
+        0,
+        0,
+        GDT_A_PRESENT | GDT_A_RING_0 | GDT_A_SYSTEM | GDT_A_PRIVILEGE,
+        GDT_F_LONG_MODE,
+    ),
+    // Kernel TLS
+    GdtEntry::new(
+        0,
+        0,
+        GDT_A_PRESENT | GDT_A_RING_3 | GDT_A_SYSTEM | GDT_A_PRIVILEGE,
+        GDT_F_LONG_MODE,
+    ),
+];
+
+// Initialize GDT
+pub unsafe fn init() {
+    // Setup the initial GDT with TLS, so we can setup the TLS GDT (a little confusing)
+    // This means that each CPU will have its own GDT, but we only need to define it once as a thread local
+    INIT_GDTR.limit = (INIT_GDT.len() * mem::size_of::<GdtEntry>() - 1) as u16;
+    INIT_GDTR.base = INIT_GDT.as_ptr() as *const SegmentDescriptor;
+
+    // Load the initial GDT, before we have access to thread locals
+    dtables::lgdt(&INIT_GDTR);
+
+    // Load the segment descriptors
+    load_cs(SegmentSelector::new(GDT_KERNEL_CODE as u16, Ring::Ring0));
+    segmentation::load_ds(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
+    segmentation::load_es(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
+    segmentation::load_fs(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
+    segmentation::load_gs(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
+    segmentation::load_ss(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
 }

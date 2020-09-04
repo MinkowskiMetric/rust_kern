@@ -1,4 +1,6 @@
-use crate::types::{PageSize, PageTableIndex, Size4KiB, Size2MiB, Size1GiB, NotGiantPageSize, VirtualAddress};
+use crate::types::{
+    NotGiantPageSize, PageSize, PageTableIndex, Size1GiB, Size2MiB, Size4KiB, VirtualAddress,
+};
 use core::{
     fmt,
     iter::Step,

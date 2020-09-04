@@ -18,9 +18,9 @@
 
 // Going to need some unsafe code for this. We don't need to be particularly
 // thread safe.
+use crate::types::VirtualAddress;
 use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
-use crate::types::VirtualAddress;
 
 extern "C" {
     static __kernel_per_cpu_start: u8;
@@ -49,10 +49,12 @@ const BIGSPACE_SIZE: usize = 1024;
 #[repr(align(4096))]
 #[repr(C)]
 struct BigSpace {
-    buf: MaybeUninit<[u8;BIGSPACE_SIZE]>,
+    buf: MaybeUninit<[u8; BIGSPACE_SIZE]>,
 }
 
-static mut big_space: BigSpace = BigSpace { buf: MaybeUninit::uninit() };
+static mut big_space: BigSpace = BigSpace {
+    buf: MaybeUninit::uninit(),
+};
 
 fn get_per_cpu_base() -> VirtualAddress {
     assert!(get_per_cpu_end() - get_per_cpu_start() < BIGSPACE_SIZE as u64);
@@ -60,7 +62,10 @@ fn get_per_cpu_base() -> VirtualAddress {
 }
 
 impl<T> PerCpuPayload<T> {
-    pub const INIT: Self = PerCpuPayload { state: Cell::new(NOT_INITIALIZED), data: UnsafeCell::new(MaybeUninit::uninit()) };
+    pub const INIT: Self = PerCpuPayload {
+        state: Cell::new(NOT_INITIALIZED),
+        data: UnsafeCell::new(MaybeUninit::uninit()),
+    };
 
     pub const fn new() -> Self {
         Self::INIT
@@ -78,7 +83,7 @@ impl<T> PerCpuPayload<T> {
 
     fn force_get<'a>(&'a self) -> &'a T {
         unsafe {
-            // SAFETY: 
+            // SAFETY:
             // * `UnsafeCell`/inner deref: data never changes again
             // * `MaybeUninit`/outer deref: data was initialized
             &*(*self.data.get()).as_ptr()
@@ -88,18 +93,17 @@ impl<T> PerCpuPayload<T> {
     pub fn get<'a>(&'a self, builder: impl FnOnce() -> T) -> &'a T {
         match self.state.get() {
             NOT_INITIALIZED => {
-                let mut finish = Finish { state: &self.state, panicked: true };
-                unsafe {
-                    (*self.data.get()).as_mut_ptr().write(builder())
+                let mut finish = Finish {
+                    state: &self.state,
+                    panicked: true,
                 };
+                unsafe { (*self.data.get()).as_mut_ptr().write(builder()) };
                 finish.panicked = false;
 
                 self.state.set(COMPLETE);
                 self.force_get()
-            },
-            COMPLETE => {
-                self.force_get()
-            },
+            }
+            COMPLETE => self.force_get(),
             PANICKED => panic!("Per cpu initializer panicked"),
             _ => unsafe { core::hint::unreachable_unchecked() },
         }
@@ -119,8 +123,8 @@ impl<'a> Drop for Finish<'a> {
     }
 }
 
-unsafe impl<T: Send + Sync> Sync for PerCpuPayload<T> { }
-unsafe impl<T: Send> Send for PerCpuPayload<T> { }
+unsafe impl<T: Send + Sync> Sync for PerCpuPayload<T> {}
+unsafe impl<T: Send> Send for PerCpuPayload<T> {}
 
 #[macro_export]
 macro_rules! per_cpu {

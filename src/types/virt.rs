@@ -1,8 +1,8 @@
+use super::{align_down, align_up};
+use super::{PageOffset, PageTableIndex};
+use bit_field::BitField;
 use core::fmt;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
-use super::{align_up, align_down};
-use bit_field::BitField;
-use super::{PageOffset, PageTableIndex};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -81,12 +81,16 @@ impl VirtualAddress {
 
     #[inline]
     pub fn checked_add(self, val: impl Into<u64>) -> Option<Self> {
-        self.as_u64().checked_add(val.into()).and_then(|addr| Self::try_new(addr).ok())
+        self.as_u64()
+            .checked_add(val.into())
+            .and_then(|addr| Self::try_new(addr).ok())
     }
 
     #[inline]
     pub fn checked_sub(self, val: impl Into<u64>) -> Option<Self> {
-        self.as_u64().checked_sub(val.into()).and_then(|addr| Self::try_new(addr).ok())
+        self.as_u64()
+            .checked_sub(val.into())
+            .and_then(|addr| Self::try_new(addr).ok())
     }
 
     pub const fn page_offset(self) -> PageOffset {

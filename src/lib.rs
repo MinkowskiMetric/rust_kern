@@ -1,27 +1,42 @@
 #![no_std]
 #![cfg_attr(test, no_main)]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
 #![feature(custom_test_frameworks)]
 #![feature(never_type)]
 #![feature(step_trait)]
 #![feature(step_trait_ext)]
+#![feature(thread_local)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 extern crate rlibc;
 
-pub mod mm;
-pub mod types;
+#[macro_use]
+extern crate alloc;
+
+pub mod allocator;
 pub mod gdt;
+pub mod idt;
 pub mod init;
-pub mod interrupts;
+pub mod mm;
 pub mod percpu;
+pub mod physmem;
 pub mod serial;
+pub mod types;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
+
+#[global_allocator]
+static ALLOCATOR: allocator::Allocator = allocator::Allocator;
+
+#[alloc_error_handler]
+fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
+    panic!("allocation error: {:?}", layout);
+}
 
 pub trait Testable {
     fn run(&self) -> ();

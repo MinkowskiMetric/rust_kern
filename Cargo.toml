@@ -17,6 +17,10 @@ uart_16550 = "0.2.0"
 volatile = "0.2.6"
 x86_64 = "0.11.0"
 
+[dependencies.x86]
+version = "0.32.0"
+default-features = false
+
 [profile.dev]
 
 [profile.release]

@@ -1,7 +1,7 @@
+use super::{align_down, align_up};
+use bit_field::BitField;
 use core::fmt;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
-use super::{align_up, align_down};
-use bit_field::BitField;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
