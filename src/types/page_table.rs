@@ -21,6 +21,12 @@ impl PageTableEntry {
         self.entry == 0
     }
 
+    pub const fn from_addr_and_flags(addr: PhysicalAddress, flags: PageFlags) -> Self {
+        Self {
+            entry: addr.as_u64() | flags.bits(),
+        }
+    }
+
     pub fn set_unused(&mut self) {
         self.entry = 0;
     }
@@ -199,6 +205,7 @@ impl IndexMut<PageTableIndex> for PageTable {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageTableIndex(u16);
 
 impl PageTableIndex {

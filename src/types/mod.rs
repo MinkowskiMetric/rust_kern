@@ -8,7 +8,7 @@ mod virt;
 pub use frame::Frame;
 pub use page::Page;
 pub use page_size::{NotGiantPageSize, PageSize, Size1GiB, Size2MiB, Size4KiB};
-pub use page_table::{PageFlags, PageOffset, PageTableIndex};
+pub use page_table::{PageFlags, PageOffset, PageTable, PageTableEntry, PageTableIndex};
 pub use phys::{PhysicalAddress, PhysicalAddressNotValid};
 pub use virt::{VirtualAddress, VirtualAddressNotValid};
 

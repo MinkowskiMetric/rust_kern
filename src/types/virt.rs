@@ -110,7 +110,7 @@ impl VirtualAddress {
     }
 
     pub const fn p4_index(self) -> PageTableIndex {
-        PageTableIndex::new_truncate((self.0 >> 12 >> 9 >> 9) as u16)
+        PageTableIndex::new_truncate((self.0 >> 12 >> 9 >> 9 >> 9) as u16)
     }
 }
 

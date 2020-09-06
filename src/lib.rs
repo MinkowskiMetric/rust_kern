@@ -14,7 +14,7 @@
 
 extern crate rlibc;
 
-#[macro_use]
+//#[macro_use]
 extern crate alloc;
 
 pub mod allocator;
@@ -22,7 +22,7 @@ pub mod gdt;
 pub mod idt;
 pub mod init;
 pub mod mm;
-pub mod percpu;
+pub mod paging;
 pub mod physmem;
 pub mod serial;
 pub mod types;

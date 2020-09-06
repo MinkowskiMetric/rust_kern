@@ -1,8 +1,9 @@
 use crate::gdt;
 use crate::idt;
+use crate::paging;
 use crate::physmem;
 use crate::println;
-use bootloader::{entry_point, BootInfo};
+use bootloader::BootInfo;
 use core::panic::PanicInfo;
 
 /*pub fn start_cpu0(idle_thread_proc: impl Fn() -> !) -> ! {
@@ -35,12 +36,14 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
 
     physmem::init(boot_info);
 
+    paging::init(boot_info);
+
     println!("{} used frames", physmem::used_frames());
     println!("{} free frames", physmem::free_frames());
-    let original_free_frames = physmem::free_frames();
+    let _original_free_frames = physmem::free_frames();
 
     let alloc_frame = physmem::allocate_frame().unwrap();
-    println!("Allocated frame {}", alloc_frame);
+    println!("Allocated frame {:?}", alloc_frame);
 
     println!("{} used frames", physmem::used_frames());
     println!("{} free frames", physmem::free_frames());
@@ -48,7 +51,7 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     let mut total_frames = 1;
 
     loop {
-        if let Some(frame) = physmem::allocate_frame() {
+        if let Some(_frame) = physmem::allocate_frame() {
             total_frames += 1;
         } else {
             break;

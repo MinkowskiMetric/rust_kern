@@ -1,4 +1,5 @@
 use crate::physmem::{FrameAllocator, MemoryArea, MemoryMapIterator, PAGE_SIZE};
+use crate::types::PhysicalAddress;
 
 pub struct BumpAllocator {
     areas: MemoryMapIterator,
@@ -8,7 +9,7 @@ pub struct BumpAllocator {
 }
 
 impl BumpAllocator {
-    pub fn new(mut areas: MemoryMapIterator) -> Self {
+    pub fn new(areas: MemoryMapIterator) -> Self {
         Self {
             areas,
             current_area: None,
@@ -42,7 +43,7 @@ impl FrameAllocator for BumpAllocator {
         count as usize
     }
 
-    fn allocate_frame(&mut self) -> Option<u64> {
+    fn allocate_frame(&mut self) -> Option<PhysicalAddress> {
         loop {
             if let Some(ref current_area) = self.current_area {
                 assert!(
@@ -53,7 +54,7 @@ impl FrameAllocator for BumpAllocator {
                     let ret = self.next_free_frame;
                     self.next_free_frame += PAGE_SIZE;
                     self.used_frames += 1;
-                    return Some(ret);
+                    return Some(PhysicalAddress::new(ret));
                 } else {
                     // Otherwise, we've exhausted this region completely so we need to move on
                     self.current_area = None;
@@ -69,7 +70,7 @@ impl FrameAllocator for BumpAllocator {
         }
     }
 
-    fn deallocate_frame(&mut self, frame: u64) {
+    fn deallocate_frame(&mut self, _frame: PhysicalAddress) {
         panic!("BumpAllocator cannot deallocate frames");
     }
 }

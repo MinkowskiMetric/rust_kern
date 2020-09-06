@@ -8,7 +8,7 @@ unsafe impl GlobalAlloc for Allocator {
         null_mut()
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
         panic!("Allocator not implemented");
     }
 }

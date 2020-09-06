@@ -1,4 +1,5 @@
 use crate::println;
+use crate::types::PhysicalAddress;
 use bootloader::{bootinfo::MemoryRegionType, BootInfo};
 use bump::BumpAllocator;
 use spin::Mutex;
@@ -89,7 +90,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
             println!("{:?}", MEMORY_MAP[mem_position]);
             mem_position += 1;
             total_available_memory +=
-                (memory_region.range.end_addr() - memory_region.range.start_addr());
+                memory_region.range.end_addr() - memory_region.range.start_addr();
         }
     }
 
@@ -111,7 +112,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
             };
             mem_position += 1;
             total_pending_memory +=
-                (memory_region.range.end_addr() - memory_region.range.start_addr());
+                memory_region.range.end_addr() - memory_region.range.start_addr();
         } else if memory_region.region_type != MemoryRegionType::Usable {
             println!("Ignoring memory region {:?}", memory_region);
         }
@@ -155,11 +156,11 @@ pub fn used_frames() -> usize {
     check_allocator! { |ref allocator| { allocator.used_frames() } }
 }
 
-pub fn allocate_frame() -> Option<u64> {
+pub fn allocate_frame() -> Option<PhysicalAddress> {
     check_allocator! { |ref mut allocator| { allocator.allocate_frame() } }
 }
 
-pub fn deallocate_frame(frame: u64) {
+pub fn deallocate_frame(frame: PhysicalAddress) {
     check_allocator! { |ref mut allocator| { allocator.deallocate_frame(frame); } }
 }
 
@@ -167,6 +168,6 @@ pub trait FrameAllocator {
     fn free_frames(&self) -> usize;
     fn used_frames(&self) -> usize;
 
-    fn allocate_frame(&mut self) -> Option<u64>;
-    fn deallocate_frame(&mut self, frame: u64);
+    fn allocate_frame(&mut self) -> Option<PhysicalAddress>;
+    fn deallocate_frame(&mut self, frame: PhysicalAddress);
 }

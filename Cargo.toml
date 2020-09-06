@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 bit_field = "0.10.0"
 bitflags = "1.2.1"
-bootloader = "0.9.8"
+bootloader = { version = "0.9.8", features = ["map_physical_memory"] }
 lazy_static = { version = "1.0", features = ["spin_no_std"] }
 rlibc = "1.0.0"
 spin = "0.5.2"
@@ -33,3 +33,11 @@ test-timeout = 30
 [[test]]
 name = "stack_overflow"
 harness = false
+
+[package.metadata.bootloader]
+# The address at which the kernel stack is placed. If not provided, the bootloader
+# dynamically searches for a location.
+kernel-stack-address = "0x10000000"
+
+# The size of the kernel stack, given in number of 4KiB pages. Defaults to 512.
+kernel-stack-size = 8
