@@ -1,7 +1,7 @@
 use crate::println;
-use crate::types::PhysicalAddress;
 use bootloader::{bootinfo::MemoryRegionType, BootInfo};
 use bump::BumpAllocator;
+use core::fmt;
 use spin::Mutex;
 
 mod bump;
@@ -22,6 +22,14 @@ pub struct MemoryArea {
 }
 
 pub const PAGE_SIZE: u64 = 4096;
+
+pub fn page_align_down(addr: u64) -> u64 {
+    addr & !(PAGE_SIZE - 1)
+}
+
+pub fn page_align_up(addr: u64) -> u64 {
+    page_align_down(addr + PAGE_SIZE - 1)
+}
 
 const MAX_MEMORY_AREAS: usize = 64;
 
@@ -131,7 +139,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
 }
 
 macro_rules! check_allocator {
-    { |ref $alloc:ident| $code:block } => {
+    { |ref $alloc:ident| $code:expr } => {
         if let Some(ref $alloc) = *ALLOCATOR.lock() {
             $code
         } else {
@@ -139,7 +147,7 @@ macro_rules! check_allocator {
         }
     };
 
-    { |ref mut $alloc:ident| $code:block } => {
+    { |ref mut $alloc:ident| $code:expr } => {
         if let Some(ref mut $alloc) = *ALLOCATOR.lock() {
             $code
         } else {
@@ -148,26 +156,48 @@ macro_rules! check_allocator {
     }
 }
 
+pub struct Frame(u64);
+
+impl Frame {
+    pub fn containing_address(addr: u64) -> Self {
+        Self(page_align_down(addr) / PAGE_SIZE)
+    }
+
+    pub fn index(&self) -> u64 {
+        self.0
+    }
+
+    pub fn physical_address(&self) -> u64 {
+        self.index() * PAGE_SIZE
+    }
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!("Frame({:#x})", self.physical_address()))
+    }
+}
+
 pub fn free_frames() -> usize {
-    check_allocator! { |ref allocator| { allocator.free_frames() } }
+    check_allocator! { |ref allocator| allocator.free_frames() }
 }
 
 pub fn used_frames() -> usize {
-    check_allocator! { |ref allocator| { allocator.used_frames() } }
+    check_allocator! { |ref allocator| allocator.used_frames() }
 }
 
-pub fn allocate_frame() -> Option<PhysicalAddress> {
-    check_allocator! { |ref mut allocator| { allocator.allocate_frame() } }
+pub fn allocate_frame() -> Option<Frame> {
+    check_allocator! { |ref mut allocator| allocator.allocate_frame() }
 }
 
-pub fn deallocate_frame(frame: PhysicalAddress) {
-    check_allocator! { |ref mut allocator| { allocator.deallocate_frame(frame); } }
+pub fn deallocate_frame(frame: Frame) {
+    check_allocator! { |ref mut allocator| allocator.deallocate_frame(frame) }
 }
 
 pub trait FrameAllocator {
     fn free_frames(&self) -> usize;
     fn used_frames(&self) -> usize;
 
-    fn allocate_frame(&mut self) -> Option<PhysicalAddress>;
-    fn deallocate_frame(&mut self, frame: PhysicalAddress);
+    fn allocate_frame(&mut self) -> Option<Frame>;
+    fn deallocate_frame(&mut self, frame: Frame);
 }

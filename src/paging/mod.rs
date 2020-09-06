@@ -3,9 +3,9 @@ use crate::types::VirtualAddress;
 use bootloader::BootInfo;
 use x86::controlregs;
 
-pub use crate::physmem::PAGE_SIZE;
+pub use crate::physmem::{page_align_down, page_align_up, PAGE_SIZE};
 
-pub use crate::types::{PageFlags, PageTable, PageTableEntry};
+pub use crate::types::{PageFlags, PageTable, PageTableEntry, PhysicalAddress};
 
 // The bootloader sets us an amazing challenge - it doesn't tell us where in physical memory
 // it has loaded the kernel, or where the bootloader stack is.
@@ -13,14 +13,6 @@ pub use crate::types::{PageFlags, PageTable, PageTableEntry};
 
 // For the kernel, we can work it out because we know where the kernel is mapped,
 // and we can use that to copy the page table entries.
-
-pub fn page_align_down(addr: u64) -> u64 {
-    addr & !(PAGE_SIZE - 1)
-}
-
-pub fn page_align_up(addr: u64) -> u64 {
-    page_align_down(addr + PAGE_SIZE - 1)
-}
 
 unsafe fn copy_boot_mapping(
     boot_info: &BootInfo,
@@ -40,11 +32,12 @@ unsafe fn copy_boot_mapping(
         } else {
             let page_table_phys_addr =
                 physmem::allocate_frame().expect("cannot allocate early page directory");
-            let page_table = &mut *((page_table_phys_addr + boot_info.physical_memory_offset)
-                .as_u64() as *mut PageTable);
+            let page_table = &mut *((page_table_phys_addr.physical_address()
+                + boot_info.physical_memory_offset)
+                as *mut PageTable);
 
             init_page_table[p4_index] = PageTableEntry::from_addr_and_flags(
-                page_table_phys_addr,
+                PhysicalAddress::new(page_table_phys_addr.physical_address()),
                 PageFlags::PRESENT | PageFlags::WRITABLE,
             );
 
@@ -68,11 +61,12 @@ unsafe fn copy_boot_mapping(
             } else {
                 let page_table_phys_addr =
                     physmem::allocate_frame().expect("cannot allocate early page directory");
-                let page_table = &mut *((page_table_phys_addr + boot_info.physical_memory_offset)
-                    .as_u64() as *mut PageTable);
+                let page_table = &mut *((page_table_phys_addr.physical_address()
+                    + boot_info.physical_memory_offset)
+                    as *mut PageTable);
 
                 init_p3_table[p3_index] = PageTableEntry::from_addr_and_flags(
-                    page_table_phys_addr,
+                    PhysicalAddress::new(page_table_phys_addr.physical_address()),
                     PageFlags::PRESENT | PageFlags::WRITABLE,
                 );
 
@@ -96,11 +90,12 @@ unsafe fn copy_boot_mapping(
             } else {
                 let page_table_phys_addr =
                     physmem::allocate_frame().expect("cannot allocate early page directory");
-                let page_table = &mut *((page_table_phys_addr + boot_info.physical_memory_offset)
-                    .as_u64() as *mut PageTable);
+                let page_table = &mut *((page_table_phys_addr.physical_address()
+                    + boot_info.physical_memory_offset)
+                    as *mut PageTable);
 
                 init_p2_table[p2_index] = PageTableEntry::from_addr_and_flags(
-                    page_table_phys_addr,
+                    PhysicalAddress::new(page_table_phys_addr.physical_address()),
                     PageFlags::PRESENT | PageFlags::WRITABLE,
                 );
 
@@ -154,8 +149,8 @@ pub unsafe fn init(boot_info: &BootInfo) {
     // Allocate a new page table
     let init_page_table_phys =
         physmem::allocate_frame().expect("cannot allocate early page directory");
-    let init_page_table = &mut *((init_page_table_phys + boot_info.physical_memory_offset).as_u64()
-        as *mut PageTable);
+    let init_page_table = &mut *((init_page_table_phys.physical_address()
+        + boot_info.physical_memory_offset) as *mut PageTable);
 
     copy_boot_mapping(
         boot_info,
@@ -183,5 +178,5 @@ pub unsafe fn init(boot_info: &BootInfo) {
     );
 
     // Switch to the page table
-    controlregs::cr3_write(init_page_table_phys.as_u64());
+    controlregs::cr3_write(init_page_table_phys.physical_address());
 }

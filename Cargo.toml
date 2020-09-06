@@ -30,10 +30,6 @@ test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "st
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 30
 
-[[test]]
-name = "stack_overflow"
-harness = false
-
 [package.metadata.bootloader]
 # The address at which the kernel stack is placed. If not provided, the bootloader
 # dynamically searches for a location.

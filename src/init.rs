@@ -6,26 +6,6 @@ use crate::println;
 use bootloader::BootInfo;
 use core::panic::PanicInfo;
 
-/*pub fn start_cpu0(idle_thread_proc: impl Fn() -> !) -> ! {
-    gdt::init();
-    interrupts::init_idt();
-
-    crate::percpu::whats_going_on();
-
-    idle_thread_proc();
-}
-
-pub fn idle_proc() -> ! {
-    loop {}
-}*/
-
-#[cfg(test)]
-fn run_tests() -> ! {
-    test_main();
-
-    loop {}
-}
-
 #[no_mangle]
 #[cfg(not(test))]
 pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
@@ -89,5 +69,5 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rust_kern::test_panic_handler(info)
+    crate::test_panic_handler(info)
 }
