@@ -156,6 +156,7 @@ macro_rules! check_allocator {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Frame(u64);
 
 impl Frame {
