@@ -232,7 +232,7 @@ impl RegionManager {
     }
 
     pub fn release_region(&mut self, start_va: u64, limit_va: u64) {
-        todo!()
+        todo!("implement release region {:#x} - {:#x}", start_va, limit_va)
     }
 
     fn split_region(

@@ -8,6 +8,9 @@ use spin::Mutex;
 const MINIMUM_HEAP_REGION_PAGES: usize = 16;
 const MINIMUM_HEAP_REGION_SIZE: usize = (MINIMUM_HEAP_REGION_PAGES * PAGE_SIZE as usize);
 
+// When we have an empty region, we don't release it back if our free space is less than this
+const HEAP_RESERVE_LIMIT: usize = 128; // * 1024;
+
 fn align_down(addr: usize, align: usize) -> usize {
     if align.is_power_of_two() {
         addr & !(align - 1)
@@ -39,6 +42,8 @@ struct Allocation {
 
 struct FreeList {
     head: FreeNode,
+    allocated_space: usize,
+    free_space: usize,
 }
 
 impl FreeList {
@@ -48,6 +53,8 @@ impl FreeList {
                 size: 0,
                 next: None,
             },
+            allocated_space: 0,
+            free_space: 0,
         }
     }
 
@@ -67,6 +74,8 @@ impl FreeList {
                 size: 0,
                 next: Some(&mut *ptr),
             },
+            allocated_space: 0,
+            free_space: size,
         }
     }
 
@@ -80,6 +89,8 @@ impl FreeList {
                 Self::deallocate_from_hole_info(&mut self.head, back_padding);
             }
 
+            self.allocated_space += allocation.info.size;
+            self.free_space -= allocation.info.size;
             NonNull::new(allocation.info.addr as *mut u8).unwrap()
         })
     }
@@ -92,6 +103,16 @@ impl FreeList {
                 size: layout.size(),
             },
         );
+        self.allocated_space -= layout.size();
+        self.free_space += layout.size();
+    }
+
+    pub fn free_space(&self) -> usize {
+        self.free_space
+    }
+
+    pub fn allocated_space(&self) -> usize {
+        self.allocated_space
     }
 
     fn tail_allocate(mut prev_node: &mut FreeNode, layout: Layout) -> Option<Allocation> {
@@ -102,6 +123,7 @@ impl FreeList {
                 .and_then(|current| Self::allocate_from_hole_info(current.info(), layout));
             if let Some(allocation) = allocation {
                 // So, remove the free node from the list and return the allocation descriptor
+                let remove_node = prev_node.next.as_mut().unwrap();
                 prev_node.next = prev_node.next.as_mut().unwrap().next.take();
                 return Some(allocation);
             } else if prev_node.next.is_some() {
@@ -249,37 +271,16 @@ impl FreeNode {
 }
 
 struct HeapRegionList {
-    head: Option<&'static mut HeapRegion>,
+    head: HeapRegion,
 }
 
 impl HeapRegionList {
     pub const fn empty() -> Self {
-        Self { head: None }
-    }
-
-    pub fn new(region: Region) -> Self {
-        let (start, limit) = (region.start(), region.limit());
-
-        // This should be a no-op since the allocation should come from the page
-        // allocator and be page aligned, but it does not hurt to be safe
-        let aligned_start = align_up(start as usize, align_of::<HeapRegion>()) as u64;
-        // And we should definitely be able to fit a free node in the list
-        let size = limit.saturating_sub(aligned_start) as usize;
-        assert!(size >= size_of::<HeapRegion>());
-
-        let ptr = aligned_start as *mut HeapRegion;
-        unsafe {
-            ptr.write(HeapRegion {
-                alloc_region: region,
-                free_list: unsafe {
-                    FreeList::new(aligned_start + size_of::<HeapRegion>() as u64, limit)
-                },
+        Self {
+            head: HeapRegion {
+                payload: None,
                 next: None,
-            })
-        };
-
-        HeapRegionList {
-            head: Some(unsafe { &mut *ptr }),
+            },
         }
     }
 
@@ -297,38 +298,126 @@ impl HeapRegionList {
             align_of::<FreeNode>(),
         );
 
-        let ret = Layout::from_size_align(required_size, required_alignment).ok();
-        use crate::println;
-        println!("Original layout: {:?}", layout);
-        println!("Fixed up layout: {:?}", ret);
-        ret
+        Layout::from_size_align(required_size, required_alignment).ok()
     }
 
     pub unsafe fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         Self::align_layout(layout).and_then(|aligned_layout| {
-            self.walk_regions(|region| region.allocate(aligned_layout))
+            Self::do_allocate(&mut self.head, layout)
                 .or_else(|| self.expand_and_allocate(aligned_layout))
         })
     }
 
-    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        Self::align_layout(layout)
-            .and_then(|aligned_layout| {
-                self.walk_regions(|region| region.deallocate(ptr, aligned_layout))
-            })
-            .expect("Failed to deallocate pointer");
-    }
-
-    fn walk_regions<T, F: Fn(&mut HeapRegion) -> Option<T>>(&mut self, f: F) -> Option<T> {
-        self.head.as_mut().and_then(|mut this_region| loop {
-            if let Some(v) = f(this_region) {
-                return Some(v);
-            } else if this_region.next.is_some() {
-                this_region = this_region.next.as_mut().unwrap();
+    unsafe fn do_allocate(mut prev_region: &mut HeapRegion, layout: Layout) -> Option<NonNull<u8>> {
+        loop {
+            let allocation = prev_region
+                .next
+                .as_mut()
+                .and_then(|this_region| this_region.allocate(layout));
+            if let Some(allocation) = allocation {
+                return Some(allocation);
+            } else if prev_region.next.is_some() {
+                prev_region = prev_region.next.as_mut().unwrap();
             } else {
+                // No allocation was found
                 return None;
             }
-        })
+        }
+    }
+
+    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        Self::align_layout(layout).map(|aligned_layout| {
+            if let Some(mut removed_region) = Self::do_deallocate(&mut self.head, ptr, layout) {
+                // If we have enough free space, then we do not need to keep this region around and we can drop it.
+                // But, we don't want to keep really big regions around, so if the regions free space is larger than
+                // the default space we always drop it
+                if removed_region.next.as_mut().unwrap().free_space() < MINIMUM_HEAP_REGION_SIZE
+                    && self.free_space() < HEAP_RESERVE_LIMIT
+                {
+                    removed_region.next.as_mut().unwrap().next = self.head.next.take();
+                    self.head.next = removed_region.next.take();
+                } else {
+                    core::ptr::drop_in_place(removed_region.next.unwrap() as *mut HeapRegion);
+                }
+            }
+        });
+    }
+
+    unsafe fn do_deallocate(
+        mut prev_region: &mut HeapRegion,
+        ptr: NonNull<u8>,
+        layout: Layout,
+    ) -> Option<HeapRegion> {
+        loop {
+            let deallocate_result = prev_region
+                .next
+                .as_mut()
+                .and_then(|this_region| this_region.deallocate(ptr, layout));
+            if let Some(_) = deallocate_result {
+                if prev_region.next.as_ref().unwrap().allocated_space() == 0 {
+                    let mut removed_region = HeapRegion {
+                        payload: None,
+                        next: prev_region.next.take(),
+                    };
+                    prev_region.next = removed_region.next.as_mut().unwrap().next.take();
+
+                    return Some(removed_region);
+                } else {
+                    return None;
+                }
+            } else if prev_region.next.is_some() {
+                prev_region = prev_region.next.as_mut().unwrap();
+            } else {
+                panic!("Failed to deallocate pointer");
+            }
+        }
+    }
+
+    pub fn free_space(&self) -> usize {
+        let mut prev_region = &self.head;
+        let mut free_space = 0;
+        loop {
+            free_space += prev_region
+                .next
+                .as_ref()
+                .map(|region| region.free_space())
+                .unwrap_or(0);
+            if prev_region.next.is_some() {
+                prev_region = prev_region.next.as_ref().unwrap();
+            } else {
+                return free_space;
+            }
+        }
+    }
+
+    pub fn allocated_space(&self) -> usize {
+        let mut prev_region = &self.head;
+        let mut allocated_space = 0;
+        loop {
+            allocated_space += prev_region
+                .next
+                .as_ref()
+                .map(|region| region.allocated_space())
+                .unwrap_or(0);
+            if prev_region.next.is_some() {
+                prev_region = prev_region.next.as_ref().unwrap();
+            } else {
+                return allocated_space;
+            }
+        }
+    }
+
+    pub fn region_count(&self) -> usize {
+        let mut prev_region = &self.head;
+        let mut region_count = 0;
+        loop {
+            region_count += prev_region.next.as_ref().map(|_| 1).unwrap_or(0);
+            if prev_region.next.is_some() {
+                prev_region = prev_region.next.as_ref().unwrap();
+            } else {
+                return region_count;
+            }
+        }
     }
 
     unsafe fn expand_and_allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
@@ -365,12 +454,32 @@ impl HeapRegionList {
         allocate_region(allocation_pages, RegionFlags::empty())
             .ok()
             .map(|region| {
-                let mut new_region_list = HeapRegionList::new(region);
+                let (start, limit) = (region.start(), region.limit());
 
-                new_region_list.head.as_mut().unwrap().next = self.head.take();
-                self.head = new_region_list.head;
+                // This should be a no-op since the allocation should come from the page
+                // allocator and be page aligned, but it does not hurt to be safe
+                let aligned_start = align_up(start as usize, align_of::<HeapRegion>()) as u64;
+                // And we should definitely be able to fit a free node in the list
+                let size = limit.saturating_sub(aligned_start) as usize;
+                assert!(size >= size_of::<HeapRegion>());
+
+                let ptr = aligned_start as *mut HeapRegion;
+                unsafe {
+                    ptr.write(HeapRegion {
+                        payload: Some(HeapRegionPayload {
+                            alloc_region: region,
+                            free_list: unsafe {
+                                FreeList::new(aligned_start + size_of::<HeapRegion>() as u64, limit)
+                            },
+                        }),
+                        next: self.head.next.take(),
+                    })
+                };
+
+                self.head.next = Some(unsafe { &mut *ptr });
 
                 self.head
+                    .next
                     .as_mut()
                     .unwrap()
                     .allocate(layout)
@@ -379,13 +488,12 @@ impl HeapRegionList {
     }
 }
 
-struct HeapRegion {
+struct HeapRegionPayload {
     alloc_region: Region,
     free_list: FreeList,
-    next: Option<&'static mut HeapRegion>,
 }
 
-impl HeapRegion {
+impl HeapRegionPayload {
     pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         self.free_list.allocate(layout)
     }
@@ -400,7 +508,57 @@ impl HeapRegion {
     }
 
     pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
-        todo!("Implement contains")
+        let addr = ptr.as_ptr() as usize;
+        addr >= self.alloc_region.start() as usize
+            && size < (self.alloc_region.limit() - self.alloc_region.start()) as usize
+    }
+
+    pub fn free_space(&self) -> usize {
+        self.free_list.free_space()
+    }
+
+    pub fn allocated_space(&self) -> usize {
+        self.free_list.allocated_space()
+    }
+}
+
+struct HeapRegion {
+    payload: Option<HeapRegionPayload>,
+    next: Option<&'static mut HeapRegion>,
+}
+
+impl HeapRegion {
+    pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        self.payload
+            .as_mut()
+            .and_then(|payload| payload.allocate(layout))
+    }
+
+    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Option<()> {
+        self.payload
+            .as_mut()
+            .and_then(|payload| payload.deallocate(ptr, layout))
+    }
+
+    pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
+        self.payload
+            .as_ref()
+            .map(|payload| payload.contains(ptr, size))
+            .unwrap_or(false)
+    }
+
+    pub fn free_space(&self) -> usize {
+        self.payload
+            .as_ref()
+            .map(|payload| payload.free_space())
+            .unwrap_or(0)
+    }
+
+    pub fn allocated_space(&self) -> usize {
+        self.payload
+            .as_ref()
+            .map(|payload| payload.allocated_space())
+            .unwrap_or(0)
     }
 }
 
@@ -424,7 +582,9 @@ unsafe impl GlobalAlloc for SimpleAllocator {
             .map_or(null_mut(), |n| n.as_ptr())
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        panic!("Allocator not implemented");
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.head_region
+            .lock()
+            .deallocate(NonNull::new(ptr).unwrap(), layout);
     }
 }

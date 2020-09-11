@@ -13,10 +13,16 @@ impl StackManager {
         assert!(pages > 1, "Kernel stack allocation includes guard page");
 
         // Allocate the pages for the stack.
-        let pages: Vec<_> = (1..pages).map(|_| allocate_frame()).collect();
+        let mut pages: Vec<_> = (1..pages).map(|_| allocate_frame()).collect();
 
         use crate::println;
         println!("Stack pages {:#?}", pages);
+
+        for i in 0..20000 {
+            pages.push(allocate_frame());
+        }
+
+        core::mem::drop(pages);
 
         todo!()
     }
