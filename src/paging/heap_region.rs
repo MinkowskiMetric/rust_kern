@@ -115,6 +115,10 @@ impl RegionHeader {
         })
     }
 
+    fn is_free_region(&self) -> bool {
+        !self.pte_1.flags().contains(PageFlags::PRESENT)
+    }
+
     fn this_region_size_in_chunks(&self) -> usize {
         get_chunks_from_pte(*self.pte_1)
     }
@@ -160,24 +164,7 @@ impl RegionManager {
         let mut page_table = unsafe { lock_page_table() }?;
 
         // Create free chunks starting at the base address
-        let mut free_region_start = base;
-        let mut remaining_region_chunks = size_in_region_chunks;
-        let mut last_region_chunks = 0;
-        while remaining_region_chunks > 0 {
-            let this_region_chunks = remaining_region_chunks.min(MAX_REGION_CHUNKS as u64);
-
-            let mut region_header = RegionHeader::create(&mut page_table, free_region_start)?;
-            region_header
-                .set_this_region_size_in_chunks(this_region_chunks as usize, RegionFlags::empty());
-            region_header
-                .set_prev_region_size_in_chunks(last_region_chunks as usize, RegionFlags::empty());
-
-            last_region_chunks = this_region_chunks;
-            remaining_region_chunks -= this_region_chunks;
-            free_region_start += (this_region_chunks * REGION_CHUNK_SIZE as u64);
-        }
-
-        assert!(free_region_start == limit);
+        Self::create_free_region_chain(&mut page_table, base, size_in_region_chunks)?;
 
         Ok(RegionManager { base, limit })
     }
@@ -232,7 +219,67 @@ impl RegionManager {
     }
 
     pub fn release_region(&mut self, start_va: u64, limit_va: u64) {
-        todo!("implement release region {:#x} - {:#x}", start_va, limit_va)
+        assert_eq!(start_va & !(REGION_CHUNK_SIZE as u64 - 1), start_va, "Invalid start address");
+        assert!(start_va >= self.base, "Invalid start address");
+        assert_eq!(limit_va & !(REGION_CHUNK_SIZE as u64 - 1), limit_va, "Invalid limit address");
+        assert!(limit_va >= start_va && limit_va <= self.limit, "Invalid limit address");
+
+        let size_in_chunks = (limit_va - start_va) / REGION_CHUNK_SIZE as u64;
+        unsafe { lock_page_table() }.and_then(|mut page_table| {
+            let prev_region_size = {
+                let mut region_header = RegionHeader::create(&mut page_table, start_va)?;
+                assert_eq!(region_header.this_region_size_in_chunks() as u64, size_in_chunks, "Invalid region size");
+                assert!(!region_header.is_free_region(), "Double freeing region");
+
+                // We ignore the previous region size for the first region because the special
+                // encoding will catch us out
+                if start_va > self.base {
+                    region_header.prev_region_size_in_chunks()
+                } else {
+                    0
+                }
+            };
+            assert!((start_va - self.base) >= (prev_region_size * REGION_CHUNK_SIZE) as u64, "Invalid prev region size");
+
+            // Unmap any pages in the region
+            self.unmap_region(&mut page_table, start_va, size_in_chunks as usize);
+
+            // We need to count forward how many free chunks there are after this one
+            let mut free_chunks = size_in_chunks;
+            let mut free_chunks_end = limit_va;
+            let mut last_chunk_size = size_in_chunks;
+            while free_chunks_end < self.limit {
+                let mut following_region_header = RegionHeader::create(&mut page_table, free_chunks_end)?;
+                assert_eq!(following_region_header.prev_region_size_in_chunks() as u64, last_chunk_size, "Invalid prev region size");
+
+                if !following_region_header.is_free_region() {
+                    break;
+                }
+
+                // We're going to include this region into the free region block we're creating
+                last_chunk_size = following_region_header.this_region_size_in_chunks() as u64;
+                free_chunks += last_chunk_size;
+                free_chunks_end += (last_chunk_size * REGION_CHUNK_SIZE as u64);
+                assert!(free_chunks_end <= self.limit, "Invalid region size");
+            }
+
+            let free_chunks_start = start_va - if prev_region_size > 0 {
+                let mut prev_region_header = RegionHeader::create(&mut page_table, start_va - (prev_region_size * REGION_CHUNK_SIZE) as u64)?;
+                assert_eq!(prev_region_header.this_region_size_in_chunks(), prev_region_size, "Invalid prev region size");
+
+                // If the previous region is free then merge the two
+                if prev_region_header.is_free_region() {
+                    free_chunks += prev_region_size as u64;
+                    (prev_region_size * REGION_CHUNK_SIZE) as u64
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            Self::create_free_region_chain(&mut page_table, free_chunks_start, free_chunks)
+        }).expect("what if this fails!?");
     }
 
     fn split_region(
@@ -269,6 +316,29 @@ impl RegionManager {
         Ok(())
     }
 
+    fn create_free_region_chain(page_table: &mut ActivePageTable, start: u64, chunks: u64) -> Result<()> {
+        use crate::println;
+        println!("CREATE CHAIN {:#x} - {}", start, chunks);
+        let mut free_region_start = start;
+        let mut remaining_region_chunks = chunks;
+        let mut last_region_chunks = 0;
+        while remaining_region_chunks > 0 {
+            let this_region_chunks = remaining_region_chunks.min(MAX_REGION_CHUNKS as u64);
+
+            let mut region_header = RegionHeader::create(page_table, free_region_start)?;
+            region_header
+                .set_this_region_size_in_chunks(this_region_chunks as usize, RegionFlags::empty());
+            region_header
+                .set_prev_region_size_in_chunks(last_region_chunks as usize, RegionFlags::empty());
+
+            last_region_chunks = this_region_chunks;
+            remaining_region_chunks -= this_region_chunks;
+            free_region_start += (this_region_chunks * REGION_CHUNK_SIZE as u64);
+        }
+
+        Ok(())
+    }
+
     fn map_region(
         &mut self,
         page_table: &mut ActivePageTable,
@@ -276,7 +346,7 @@ impl RegionManager {
         region_chunks: usize,
     ) -> Result<()> {
         for chunk_index in 0..region_chunks {
-            let map_chunk_result: Result<()> = {
+            let map_chunk_result: Result<()> = try {
                 let chunk_start = region_start + (chunk_index * REGION_CHUNK_SIZE) as u64;
 
                 for page_idx in 0..REGION_ALIGNMENT_PAGES {
@@ -298,8 +368,6 @@ impl RegionManager {
                             | PageFlags::NO_EXECUTE,
                     );
                 }
-
-                Ok(())
             };
 
             if let Err(e) = map_chunk_result {
@@ -320,7 +388,27 @@ impl RegionManager {
         region_start: u64,
         region_chunks: usize,
     ) {
-        todo!()
+        let res: Result<()> = try {
+            for page_idx in 0..(region_chunks * REGION_ALIGNMENT_PAGES) {
+                let page_start = region_start + (page_idx as u64 * PAGE_SIZE);
+                let mut pte = page_table.create_pte_mut_for_address(page_start)?;
+
+                let original_flags = pte.flags();
+                assert!(original_flags.contains(PageFlags::PRESENT));
+
+                let frame = pte.frame();
+
+                // Clear the present, writeable and no execute flags
+                let new_flags = original_flags & !(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE);
+
+                *pte = PageTableEntry::from_frame_and_flags(Frame::containing_address(0), new_flags);
+                unsafe { x86::tlb::flush(page_start as usize); }
+
+                crate::physmem::deallocate_frame(frame);
+            }
+        };
+        
+        res.expect("What do we do with an error here?")
     }
 }
 

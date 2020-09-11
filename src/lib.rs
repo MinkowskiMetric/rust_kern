@@ -10,6 +10,7 @@
 #![feature(step_trait)]
 #![feature(step_trait_ext)]
 #![feature(thread_local)]
+#![feature(try_blocks)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 

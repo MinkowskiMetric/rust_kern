@@ -74,7 +74,36 @@ impl Iterator for MemoryMapIterator {
     }
 }
 
-static ALLOCATOR: Mutex<Option<BumpAllocator>> = Mutex::new(None);
+struct LeakAllocator<SrcAllocator: FrameAllocator> {
+    src_allocator: SrcAllocator,
+}
+
+impl<SrcAllocator: FrameAllocator> LeakAllocator<SrcAllocator> {
+    pub fn new(src_allocator: SrcAllocator) -> Self {
+        Self { src_allocator }
+    }
+}
+
+impl<SrcAllocator: FrameAllocator> FrameAllocator for LeakAllocator<SrcAllocator> {
+    fn free_frames(&self) -> usize {
+        self.src_allocator.free_frames()
+    }
+
+    fn used_frames(&self) -> usize {
+        self.src_allocator.used_frames()
+    }
+
+    fn allocate_frame(&mut self) -> Option<Frame> {
+        self.src_allocator.allocate_frame()
+    }
+
+    fn deallocate_frame(&mut self, _frame: Frame) {
+        // do nothing and leak the frame
+    }
+
+}
+
+static ALLOCATOR: Mutex<Option<LeakAllocator<BumpAllocator>>> = Mutex::new(None);
 
 pub unsafe fn init(boot_info: &BootInfo) {
     let mut mem_position = 0;
@@ -133,9 +162,9 @@ pub unsafe fn init(boot_info: &BootInfo) {
     println!("Total available memory: {} bytes", total_available_memory);
     println!("Total pending memory: {} bytes", total_pending_memory);
 
-    *ALLOCATOR.lock() = Some(BumpAllocator::new(MemoryMapIterator::new(
+    *ALLOCATOR.lock() = Some(LeakAllocator::new(BumpAllocator::new(MemoryMapIterator::new(
         MemoryAreaType::Usable,
-    )));
+    ))));
 }
 
 macro_rules! check_allocator {
