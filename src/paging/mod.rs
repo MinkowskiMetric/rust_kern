@@ -44,8 +44,8 @@ pub const HYPERSPACE_BASE: u64 = 0xffff_ff80_0000_0000;
 pub const HYPERSPACE_LIMIT: u64 = 0xffff_ff80_4000_0000;
 
 // Allow 1GB for stacks
-pub const KERNEL_STACKS_BASE: u64 = 0xffff_ff80_4000_0000;
-pub const KERNEL_STACKS_LIMIT: u64 = 0xffff_ff80_8000_0000;
+pub const KERNEL_STACKS_BASE: usize = 0xffff_ff80_4000_0000;
+pub const KERNEL_STACKS_LIMIT: usize = 0xffff_ff80_8000_0000;
 
 // Allow 1GB for heap regions
 pub const KERNEL_HEAP_BASE: u64 = 0xffff_ff80_8000_0000;
@@ -154,6 +154,9 @@ pub unsafe fn init(boot_info: &BootInfo) {
     let boot_stack_start = 0x10000000 + PAGE_SIZE;
     let boot_stack_end = boot_stack_start + (PAGE_SIZE * 8);
 
+    let boot_info_start = 0x20000000;
+    let boot_info_end = boot_info_start + PAGE_SIZE;
+
     // How do we get hold of the bootloader page table. Fortunately, the bootloader identity maps
     // enough physical memory that we can access it directly like this.
     let bootloader_page_table =
@@ -198,6 +201,14 @@ pub unsafe fn init(boot_info: &BootInfo) {
         boot_stack_end,
         PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
     );
+    copy_boot_mapping(
+        boot_info,
+        bootloader_page_table,
+        init_page_table,
+        boot_info_start,
+        boot_info_end,
+        PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
+    );
 
     // We need to copy an additional mapping for VGA memory since the logger uses it
     // TODOTODOTODO - should fix this
@@ -219,25 +230,9 @@ pub unsafe fn init(boot_info: &BootInfo) {
     // Complete hyperspace setup
     hyperspace::init_post_paging();
 
-    let mut combiner = MapperFlushAll::new();
-
-    {
-        let mut active_page_table = lock_page_table().expect("Failed to lock page table in boot");
-        combiner.consume(
-            active_page_table
-                .map_to(
-                    0xb9000,
-                    Frame::containing_address(0xb8000),
-                    PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
-                )
-                .expect("Failed to map VGA memory"),
-        );
-
-        combiner.flush(&active_page_table);
-    }
-
     // Initialize the stack and region manager
-    stacks::init();
+    stacks::init(KERNEL_STACKS_BASE, KERNEL_STACKS_LIMIT)
+        .expect("Failed to initialize kernel stacks");
     heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT)
         .expect("Failed to initialize heap regions");
 }

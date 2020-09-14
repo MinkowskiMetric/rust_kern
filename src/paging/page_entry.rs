@@ -74,6 +74,10 @@ bitflags! {
 pub struct PageTableEntry(u64);
 
 impl PageTableEntry {
+    pub const fn unused() -> Self {
+        Self(0)
+    }
+
     pub fn from_frame_and_flags(frame: Frame, flags: PageFlags) -> Self {
         Self(frame.physical_address() | flags.bits())
     }
@@ -105,5 +109,50 @@ impl fmt::Debug for PageTableEntry {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Can probably do better than this
         f.write_fmt(format_args!("PageTableEntry({:#x})", self.0))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NotPresentPte {
+    Unused,
+    KernelStackGuardPage { length: u16 },
+    KernelStackSpacePage { length: u16 },
+
+    Uncategorized(PageTableEntry),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPteError(PageTableEntry);
+
+impl NotPresentPte {
+    pub const fn unused() -> Self {
+        Self::Unused
+    }
+}
+
+impl From<NotPresentPte> for PageTableEntry {
+    fn from(npp: NotPresentPte) -> Self {
+        match npp {
+            NotPresentPte::Unused => PageTableEntry::unused(),
+            NotPresentPte::Uncategorized(pte) => pte,
+
+            NotPresentPte::KernelStackGuardPage { length } => todo!(),
+            NotPresentPte::KernelStackSpacePage { length } => todo!(),
+        }
+    }
+}
+
+impl TryFrom<PageTableEntry> for NotPresentPte {
+    type Error = InvalidPteError;
+    fn try_from(pte: PageTableEntry) -> core::result::Result<NotPresentPte, InvalidPteError> {
+        if pte.is_present() {
+            Err(InvalidPteError(pte))
+        } else if pte.is_unused() {
+            Ok(Self::unused())
+        } else {
+            match pte.flags() {
+                _ => Ok(Self::Uncategorized(pte)),
+            }
+        }
     }
 }

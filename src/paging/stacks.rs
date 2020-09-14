@@ -1,3 +1,4 @@
+use super::{lock_page_table, Mapper, Result};
 use crate::physmem::{allocate_frame, Frame};
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
@@ -6,19 +7,39 @@ use spin::Mutex;
 
 pub const DEFAULT_KERNEL_STACK_PAGES: usize = 8;
 
-struct StackManager {}
+struct StackManager {
+    base_va: usize,
+    limit_va: usize,
+}
 
 impl StackManager {
-    pub fn allocate_kernel_stack(&mut self, pages: usize) -> Option<KernelStack> {
+    pub fn new(base_va: usize, limit_va: usize) -> Result<Self> {
+        let mut ret = Self { base_va, limit_va };
+
+        ret.release_kernel_stack(base_va, limit_va)?;
+
+        Ok(ret)
+    }
+
+    pub fn allocate_kernel_stack(&mut self, pages: usize) -> Result<KernelStack> {
         assert!(pages > 1, "Kernel stack allocation includes guard page");
 
-        // Allocate the pages for the stack.
-        let mut pages: Vec<_> = (1..pages).map(|_| allocate_frame()).collect();
+        unsafe { lock_page_table() }.and_then(|page_table| {
+            // Locate a VM space for the stack
+            let stack_start_va = self.find_stack_location(&page_table, pages)?;
 
+            // Allocate the pages for the stack.
+            let mut pages: Vec<_> = (1..pages).map(|_| allocate_frame()).collect();
+
+            todo!()
+        })
+    }
+
+    pub fn release_kernel_stack(&mut self, start_va: usize, limit_va: usize) -> Result<()> {
         todo!()
     }
 
-    pub fn release_kernel_stack(&mut self, start_va: u64, limit_va: u64) {
+    fn find_stack_location(&self, page_table: &Mapper, pages: usize) -> Result<usize> {
         todo!()
     }
 }
@@ -50,8 +71,8 @@ fn lock_stack_manager<'a>() -> StackManagerLock<'a> {
 }
 
 pub struct KernelStack {
-    start_va: u64,
-    limit_va: u64,
+    start_va: usize,
+    limit_va: usize,
 }
 
 impl KernelStack {
@@ -62,11 +83,13 @@ impl KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        lock_stack_manager().release_kernel_stack(self.start_va, self.limit_va);
+        lock_stack_manager()
+            .release_kernel_stack(self.start_va, self.limit_va)
+            .expect("Failed to release kernel stack");
     }
 }
 
-pub fn init() {
+pub fn init(base_va: usize, limit_va: usize) -> Result<()> {
     use core::mem::MaybeUninit;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -77,11 +100,17 @@ pub fn init() {
     }
 
     static mut KERNEL_STACK_BUFFER: MaybeUninit<StackManager> = MaybeUninit::uninit();
-    unsafe { KERNEL_STACK_BUFFER.as_mut_ptr().write(StackManager {}) };
+    unsafe {
+        KERNEL_STACK_BUFFER
+            .as_mut_ptr()
+            .write(StackManager::new(base_va, limit_va)?)
+    };
 
     *STACK_MANAGER.lock() = Some(unsafe { core::mem::transmute(&mut KERNEL_STACK_BUFFER) });
+
+    Ok(())
 }
 
-pub fn allocate_kernel_stack(pages: usize) -> Option<KernelStack> {
+pub fn allocate_kernel_stack(pages: usize) -> Result<KernelStack> {
     lock_stack_manager().allocate_kernel_stack(pages)
 }

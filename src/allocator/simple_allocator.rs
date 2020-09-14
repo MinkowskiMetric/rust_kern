@@ -291,6 +291,7 @@ impl HeapRegionList {
         // avoid allocating anything smaller than our free node,
         let required_alignment = layout.align();
         let required_alignment = required_alignment.max(align_of::<FreeNode>());
+        assert!(required_alignment >= align_of::<FreeNode>());
 
         let required_size = layout.size();
         let required_size = align_up(
@@ -301,9 +302,9 @@ impl HeapRegionList {
         Layout::from_size_align(required_size, required_alignment).ok()
     }
 
-    pub unsafe fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
-        Self::align_layout(layout).and_then(|aligned_layout| {
-            Self::do_allocate(&mut self.head, layout)
+    pub unsafe fn alloc(&mut self, original_layout: Layout) -> Option<NonNull<u8>> {
+        Self::align_layout(original_layout).and_then(|aligned_layout| {
+            Self::do_allocate(&mut self.head, aligned_layout)
                 .or_else(|| self.expand_and_allocate(aligned_layout))
         })
     }
@@ -325,14 +326,18 @@ impl HeapRegionList {
         }
     }
 
-    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        Self::align_layout(layout).map(|aligned_layout| {
-            if let Some(mut removed_region) = Self::do_deallocate(&mut self.head, ptr, layout) {
+    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, original_layout: Layout) {
+        Self::align_layout(original_layout).map(|aligned_layout| {
+            if let Some(mut removed_region) =
+                Self::do_deallocate(&mut self.head, ptr, aligned_layout)
+            {
                 // If we have enough free space, then we do not need to keep this region around and we can drop it.
                 // But, we don't want to keep really big regions around, so if the regions free space is larger than
                 // the default space we always drop it
-                if removed_region.next.as_mut().unwrap().free_space() < MINIMUM_HEAP_REGION_SIZE
-                    && self.free_space() < HEAP_RESERVE_LIMIT
+                if !removed_region.can_free()
+                    || (removed_region.next.as_mut().unwrap().free_space()
+                        < MINIMUM_HEAP_REGION_SIZE
+                        && self.free_space() < HEAP_RESERVE_LIMIT)
                 {
                     removed_region.next.as_mut().unwrap().next = self.head.next.take();
                     self.head.next = removed_region.next.take();
@@ -467,7 +472,8 @@ impl HeapRegionList {
                 unsafe {
                     ptr.write(HeapRegion {
                         payload: Some(HeapRegionPayload {
-                            alloc_region: region,
+                            alloc_region: PayloadRegionAlloc::from_region(region),
+                            can_free: true,
                             free_list: unsafe {
                                 FreeList::new(aligned_start + size_of::<HeapRegion>() as u64, limit)
                             },
@@ -488,8 +494,34 @@ impl HeapRegionList {
     }
 }
 
+enum PayloadRegionAlloc {
+    Buffer(&'static mut [u8]),
+    Region(Region),
+}
+
+impl PayloadRegionAlloc {
+    pub fn from_region(region: Region) -> Self {
+        Self::Region(region)
+    }
+
+    pub fn from_slice(slice: &'static mut [u8]) -> Self {
+        Self::Buffer(slice)
+    }
+
+    pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
+        match self {
+            Self::Buffer(buffer) => todo!(),
+            Self::Region(region) => {
+                let addr = ptr.as_ptr() as usize;
+                addr >= region.start() as usize && size < (region.limit() - region.start()) as usize
+            }
+        }
+    }
+}
+
 struct HeapRegionPayload {
-    alloc_region: Region,
+    alloc_region: PayloadRegionAlloc,
+    can_free: bool,
     free_list: FreeList,
 }
 
@@ -508,9 +540,7 @@ impl HeapRegionPayload {
     }
 
     pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
-        let addr = ptr.as_ptr() as usize;
-        addr >= self.alloc_region.start() as usize
-            && size < (self.alloc_region.limit() - self.alloc_region.start()) as usize
+        self.alloc_region.contains(ptr, size)
     }
 
     pub fn free_space(&self) -> usize {
@@ -519,6 +549,10 @@ impl HeapRegionPayload {
 
     pub fn allocated_space(&self) -> usize {
         self.free_list.allocated_space()
+    }
+
+    pub fn can_free(&self) -> bool {
+        self.can_free
     }
 }
 
@@ -560,6 +594,13 @@ impl HeapRegion {
             .map(|payload| payload.allocated_space())
             .unwrap_or(0)
     }
+
+    pub fn can_free(&self) -> bool {
+        self.payload
+            .as_ref()
+            .map(|payload| payload.can_free())
+            .unwrap_or(false)
+    }
 }
 
 pub struct SimpleAllocator {
@@ -568,8 +609,57 @@ pub struct SimpleAllocator {
 
 impl SimpleAllocator {
     pub fn new() -> Self {
-        Self {
-            head_region: Mutex::new(HeapRegionList::empty()),
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+        if INITIALIZED.swap(true, Ordering::SeqCst) {
+            // Already initialized. This is certainly an unusual case, but we can easily cover it
+            // by simply creating a new empty heap.
+            Self {
+                head_region: Mutex::new(HeapRegionList::empty()),
+            }
+        } else {
+            const INITIAL_HEAP_REGION_SIZE: usize = 128 * 1024;
+
+            #[repr(align(4096))]
+            #[repr(C)]
+            struct InitialHeapBuffer([u8; INITIAL_HEAP_REGION_SIZE]);
+
+            // We set this up so that it is in the BSS section so we hopefully don't need to load it off the disk
+            static mut INITIAL_HEAP_REGION: InitialHeapBuffer =
+                InitialHeapBuffer([0; INITIAL_HEAP_REGION_SIZE]);
+
+            let region_start = unsafe { ((&mut INITIAL_HEAP_REGION.0[0] as *mut u8) as usize) };
+            let region_end = region_start + INITIAL_HEAP_REGION_SIZE;
+
+            let aligned_start = align_up(region_start, align_of::<HeapRegion>());
+            let size = region_end.saturating_sub(aligned_start);
+            assert!(size >= size_of::<HeapRegion>());
+
+            let ptr = aligned_start as *mut HeapRegion;
+            unsafe {
+                ptr.write(HeapRegion {
+                    payload: Some(HeapRegionPayload {
+                        alloc_region: PayloadRegionAlloc::from_slice(&mut INITIAL_HEAP_REGION.0),
+                        can_free: false,
+                        free_list: FreeList::new(
+                            (aligned_start + size_of::<HeapRegion>()) as u64,
+                            region_end as u64,
+                        ),
+                    }),
+                    next: None,
+                })
+            }
+
+            Self {
+                head_region: Mutex::new(HeapRegionList {
+                    head: HeapRegion {
+                        payload: None,
+                        next: Some(unsafe { &mut *ptr }),
+                    },
+                }),
+            }
         }
     }
 }

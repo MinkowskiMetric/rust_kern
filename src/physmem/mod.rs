@@ -97,8 +97,10 @@ impl<SrcAllocator: FrameAllocator> FrameAllocator for LeakAllocator<SrcAllocator
         self.src_allocator.allocate_frame()
     }
 
-    fn deallocate_frame(&mut self, _frame: Frame) {
+    fn deallocate_frame(&mut self, frame: Frame) {
         // do nothing and leak the frame
+        use crate::println;
+        println!("LEAKING PAGE {:?}", frame);
     }
 }
 
