@@ -100,7 +100,6 @@ impl<SrcAllocator: FrameAllocator> FrameAllocator for LeakAllocator<SrcAllocator
     fn deallocate_frame(&mut self, _frame: Frame) {
         // do nothing and leak the frame
     }
-
 }
 
 static ALLOCATOR: Mutex<Option<LeakAllocator<BumpAllocator>>> = Mutex::new(None);
@@ -162,9 +161,9 @@ pub unsafe fn init(boot_info: &BootInfo) {
     println!("Total available memory: {} bytes", total_available_memory);
     println!("Total pending memory: {} bytes", total_pending_memory);
 
-    *ALLOCATOR.lock() = Some(LeakAllocator::new(BumpAllocator::new(MemoryMapIterator::new(
-        MemoryAreaType::Usable,
-    ))));
+    *ALLOCATOR.lock() = Some(LeakAllocator::new(BumpAllocator::new(
+        MemoryMapIterator::new(MemoryAreaType::Usable),
+    )));
 }
 
 macro_rules! check_allocator {

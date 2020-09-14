@@ -8,18 +8,20 @@ pub use crate::physmem::{page_align_down, page_align_up, Frame, PAGE_SIZE};
 
 use table::{p1_index, p2_index, p3_index, p4_index};
 pub use table::{
-    HierarchyLevel, MappedPageTable, MappedPageTableMut, PageFlags, PageTable, PageTableEntry,
-    PageTableIndex, PageTableLevel, L1, L2, L3, L4,
+    HierarchyLevel, MappedPageTable, MappedPageTableMut, PageTable, PageTableIndex, PageTableLevel,
+    L1, L2, L3, L4,
 };
 
 pub use heap_region::{allocate_region, Region, RegionFlags};
 pub use hyperspace::{map_page, HyperspaceMapping};
 pub use mapper::{MappedMutPteReference, MappedPteReference, Mapper, MapperFlush, MapperFlushAll};
+pub use page_entry::{PageFlags, PageTableEntry};
 pub use stacks::{allocate_kernel_stack, KernelStack, DEFAULT_KERNEL_STACK_PAGES};
 
 mod heap_region;
 mod hyperspace;
 mod mapper;
+mod page_entry;
 mod stacks;
 mod table;
 
