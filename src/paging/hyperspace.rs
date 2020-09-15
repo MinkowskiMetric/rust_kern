@@ -1,7 +1,8 @@
 use super::{
-    p1_index, p2_index, p3_index, p4_index, Frame, MemoryError, PageFlags, PageTable,
-    PageTableEntry, PageTableIndex, Result, HYPERSPACE_BASE, L1, L4, PAGE_SIZE,
+    p1_index, p2_index, p3_index, p4_index, Frame, MemoryError, PageTable,
+    PageTableIndex, Result, HYPERSPACE_BASE, L1, L4, PAGE_SIZE,
 };
+use super::page_entry::{RawPte, RawPresentPte, PresentPageFlags};
 use bootloader::BootInfo;
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
@@ -46,13 +47,13 @@ impl HyperspaceMapper {
         self.page_table_mut()
             .iter_mut()
             .enumerate()
-            .find(|(_, e)| !e.flags().contains(PageFlags::PRESENT))
+            .find(|(_, e)| !e.is_present())
             .map(|(index, e)| {
                 let va = HYPERSPACE_BASE + (index as u64 * PAGE_SIZE);
-                *e = PageTableEntry::from_frame_and_flags(
+                *e = RawPresentPte::from_frame_and_flags(
                     frame,
-                    PageFlags::PRESENT | PageFlags::GLOBAL | PageFlags::WRITABLE,
-                );
+                    PresentPageFlags::GLOBAL | PresentPageFlags::WRITABLE,
+                ).into();
                 unsafe { tlb::flush(va as usize) };
 
                 HyperspaceMapping { va }
@@ -67,8 +68,8 @@ impl HyperspaceMapper {
         let index = PageTableIndex::try_from((va - HYPERSPACE_BASE) / PAGE_SIZE).unwrap();
         let page_table = self.page_table_mut();
 
-        assert!(page_table[index].flags().contains(PageFlags::PRESENT));
-        page_table[index].set_unused();
+        assert!(page_table[index].is_present());
+        page_table[index] = RawPte::unused();
         unsafe { tlb::flush(va as usize) };
     }
 
@@ -133,15 +134,15 @@ pub unsafe fn init(boot_info: &BootInfo, page_table: &'static mut PageTable<L4>)
 
     assert!(l1_table
         .iter()
-        .find(|e| e.flags().contains(PageFlags::PRESENT))
+        .find(|e| e.is_present())
         .is_none());
 
     // Most important thing - we need to map the hyperspace page table into hyperspace. We defer
     // generating the reference to it until the page table is mapped
-    l1_table[PageTableIndex::new_unchecked(0)] = PageTableEntry::from_frame_and_flags(
+    l1_table[PageTableIndex::new_unchecked(0)] = RawPresentPte::from_frame_and_flags(
         l1_table_frame,
-        PageFlags::GLOBAL | PageFlags::PRESENT | PageFlags::WRITABLE,
-    );
+        PresentPageFlags::GLOBAL | PresentPageFlags::WRITABLE,
+    ).into();
 
     HYPERSPACE
         .lock()

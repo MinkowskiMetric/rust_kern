@@ -22,10 +22,11 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     // gives us enough working heap to allocate during paging initialization
     allocator::init();
 
-    paging::init(boot_info);
-
-    // Now that we have a functioning heap, we can make a copy of the boot memory map
+    // Now that we have a functioning heap, we can make a copy of the boot memory map.
+    // Eventually we will pass this to the paging manager instead of the one from the bootloader
     let memory_map: Vec<_> = boot_info.memory_map.iter().cloned().collect();
+
+    paging::init(boot_info);
 
     /*println!("{} used frames", physmem::used_frames());
     println!("{} free frames", physmem::free_frames());
@@ -76,6 +77,8 @@ fn init_post_paging(idle_thread_stack: paging::KernelStack, memory_map: Vec<Memo
         "Running on our own stack! {:?}",
         &idle_thread_stack as *const paging::KernelStack
     );
+
+    println!("MEM {:?}", memory_map);
 
     loop {}
 }

@@ -1,6 +1,8 @@
 #![no_std]
 #![cfg_attr(test, no_main)]
 #![feature(abi_x86_interrupt)]
+#![feature(asm)]
+#![feature(box_syntax)]
 #![feature(alloc_error_handler)]
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
@@ -23,6 +25,7 @@ pub mod allocator;
 pub mod gdt;
 pub mod idt;
 pub mod init;
+pub mod init_mutex;
 pub mod mm;
 pub mod paging;
 pub mod physmem;

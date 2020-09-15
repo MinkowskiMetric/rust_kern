@@ -1,4 +1,5 @@
-use super::{map_page, HyperspaceMapping, MemoryError, PageFlags, PageTableEntry, Result};
+use super::page_entry::{PresentPageFlags, RawPresentPte, RawPte};
+use super::{map_page, HyperspaceMapping, MemoryError, Result};
 use crate::physmem;
 use crate::physmem::Frame;
 use bootloader::BootInfo;
@@ -215,7 +216,7 @@ pub trait BootPageTable<L: PageTableLevel> {
 
 #[repr(C)]
 #[repr(align(4096))]
-pub struct PageTable<L: PageTableLevel>([PageTableEntry; ENTRY_COUNT as usize], PhantomData<L>);
+pub struct PageTable<L: PageTableLevel>([RawPte; ENTRY_COUNT as usize], PhantomData<L>);
 
 impl<L: PageTableLevel> PageTable<L> {
     pub unsafe fn at_virtual_address(addr: u64) -> &'static Self {
@@ -226,17 +227,17 @@ impl<L: PageTableLevel> PageTable<L> {
         &mut *(addr as *mut Self)
     }
 
-    pub fn iter<'a>(&'a self) -> core::slice::Iter<'a, PageTableEntry> {
+    pub fn iter<'a>(&'a self) -> core::slice::Iter<'a, RawPte> {
         self.0.iter()
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> core::slice::IterMut<'a, PageTableEntry> {
+    pub fn iter_mut<'a>(&'a mut self) -> core::slice::IterMut<'a, RawPte> {
         self.0.iter_mut()
     }
 
     pub fn zero(&mut self) {
         for entry in self.iter_mut() {
-            entry.set_unused();
+            *entry = RawPte::unused();
         }
     }
 }
@@ -250,22 +251,18 @@ impl<L: 'static + HierarchyLevel> BootPageTable<L> for PageTable<L> {
         if self.next_table_frame(index).is_err() {
             assert!(
                 !self[index]
-                    .flags()
-                    .contains(PageFlags::PRESENT | PageFlags::HUGE_PAGE),
+                    .present()
+                    .map(|present_pte| present_pte.is_huge())
+                    .unwrap_or(false),
                 "Huge page not supported"
-            );
-            assert!(
-                !self[index]
-                    .flags()
-                    .contains(PageFlags::KERNEL_PROTECTED_PML4),
-                "Allocating in unsafe kernel address space"
             );
             let new_page_table = physmem::allocate_frame()
                 .expect("Failed to allocate frame in boot_create_next_table");
-            self[index] = PageTableEntry::from_frame_and_flags(
+            self[index] = RawPresentPte::from_frame_and_flags(
                 new_page_table,
-                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
-            );
+                PresentPageFlags::WRITABLE | PresentPageFlags::USER_ACCESSIBLE,
+            )
+            .into();
         }
 
         self.boot_next_table_mut(boot_info, index).unwrap()
@@ -302,22 +299,18 @@ impl<L: 'static + HierarchyLevel> PageTable<L> {
         if self.next_table_frame(index) == Err(MemoryError::NotMapped) {
             assert!(
                 !self[index]
-                    .flags()
-                    .contains(PageFlags::PRESENT | PageFlags::HUGE_PAGE),
+                    .present()
+                    .map(|present_pte| present_pte.is_huge())
+                    .unwrap_or(false),
                 "Huge page not supported"
-            );
-            assert!(
-                !self[index]
-                    .flags()
-                    .contains(PageFlags::KERNEL_PROTECTED_PML4),
-                "Allocating in unsafe kernel address space"
             );
             let new_page_table = physmem::allocate_frame()
                 .expect("Failed to allocate frame in boot_create_next_table");
-            self[index] = PageTableEntry::from_frame_and_flags(
+            self[index] = RawPresentPte::from_frame_and_flags(
                 new_page_table,
-                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
-            );
+                PresentPageFlags::WRITABLE | PresentPageFlags::USER_ACCESSIBLE,
+            )
+            .into();
         }
 
         self.next_table_mut(index)
@@ -337,17 +330,15 @@ impl<L: 'static + HierarchyLevel> PageTable<L> {
     }
 
     pub fn next_table_frame(&self, index: PageTableIndex) -> Result<Frame> {
-        let entry = &self[index];
-        if entry.flags().contains(PageFlags::PRESENT) {
-            Ok(entry.frame())
-        } else {
-            Err(MemoryError::NotMapped)
-        }
+        self[index]
+            .present()
+            .map(|present_pte| present_pte.frame())
+            .or(Err(MemoryError::NotMapped))
     }
 }
 
 impl<L: PageTableLevel> Index<PageTableIndex> for PageTable<L> {
-    type Output = PageTableEntry;
+    type Output = RawPte;
 
     fn index(&self, index: PageTableIndex) -> &Self::Output {
         &self.0[usize::from(index)]

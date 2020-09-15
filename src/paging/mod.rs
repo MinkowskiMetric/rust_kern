@@ -15,7 +15,6 @@ pub use table::{
 pub use heap_region::{allocate_region, Region, RegionFlags};
 pub use hyperspace::{map_page, HyperspaceMapping};
 pub use mapper::{MappedMutPteReference, MappedPteReference, Mapper, MapperFlush, MapperFlushAll};
-pub use page_entry::{PageFlags, PageTableEntry};
 pub use stacks::{allocate_kernel_stack, KernelStack, DEFAULT_KERNEL_STACK_PAGES};
 
 mod heap_region;
@@ -31,6 +30,7 @@ pub enum MemoryError {
     NotMapped,
     NoRegionAddressSpaceAvailable,
     OutOfMemory,
+    InvalidStack,
 }
 
 pub type Result<T> = core::result::Result<T, MemoryError>;
@@ -104,7 +104,7 @@ unsafe fn copy_boot_mapping(
     init_p4_table: &mut PageTable<L4>,
     start: u64,
     end: u64,
-    flags: PageFlags,
+    flags: page_entry::PresentPageFlags,
 ) {
     use table::BootPageTable;
 
@@ -123,8 +123,10 @@ unsafe fn copy_boot_mapping(
             .boot_next_table(boot_info, p2_index(virt_page))
             .unwrap();
 
+        let boot_p1_entry = boot_p1_table[p1_index(virt_page)].present().expect("Expected present page in boot mapping");
+
         init_p1_table[p1_index(virt_page)] =
-            PageTableEntry::from_frame_and_flags(boot_p1_table[p1_index(virt_page)].frame(), flags);
+            page_entry::RawPresentPte::from_frame_and_flags(boot_p1_entry.frame(), flags).into();
 
         virt_page += PAGE_SIZE;
     }
@@ -168,30 +170,13 @@ pub unsafe fn init(boot_info: &BootInfo) {
     let init_page_table = &mut *((init_page_table_phys.physical_address()
         + boot_info.physical_memory_offset) as *mut PageTable<L4>);
 
-    // We need to be very careful about the kernel address space. We have 1TB of available
-    // address space under KERNEL_PML4 and KERNEL_DATA_PML4 which ought to be enough for anyone
-    // so we protect the rest of the kernel address space.
-    for (idx, entry) in init_page_table.iter_mut().enumerate() {
-        *entry = if idx < FIRST_KERNEL_PML4.into()
-            || idx == KERNEL_PML4.into()
-            || idx == KERNEL_DATA_PML4.into()
-        {
-            PageTableEntry::from_frame_and_flags(Frame::containing_address(0), PageFlags::empty())
-        } else {
-            PageTableEntry::from_frame_and_flags(
-                Frame::containing_address(0),
-                PageFlags::KERNEL_PROTECTED_PML4,
-            )
-        }
-    }
-
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
         kernel_start,
         kernel_end,
-        PageFlags::WRITABLE | PageFlags::PRESENT,
+        page_entry::PresentPageFlags::WRITABLE,
     );
     copy_boot_mapping(
         boot_info,
@@ -199,15 +184,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
         init_page_table,
         boot_stack_start,
         boot_stack_end,
-        PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
-    );
-    copy_boot_mapping(
-        boot_info,
-        bootloader_page_table,
-        init_page_table,
-        boot_info_start,
-        boot_info_end,
-        PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
+        page_entry::PresentPageFlags::NO_EXECUTE | page_entry::PresentPageFlags::WRITABLE,
     );
 
     // We need to copy an additional mapping for VGA memory since the logger uses it
@@ -218,7 +195,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
         init_page_table,
         0xb8000,
         0xb9000,
-        PageFlags::NO_EXECUTE | PageFlags::PRESENT | PageFlags::WRITABLE,
+        page_entry::PresentPageFlags::NO_EXECUTE | page_entry::PresentPageFlags::WRITABLE,
     );
 
     // Set up hyperspace before switching to the page table

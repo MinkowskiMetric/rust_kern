@@ -509,11 +509,17 @@ impl PayloadRegionAlloc {
     }
 
     pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
+        let addr = ptr.as_ptr() as usize;
+
         match self {
-            Self::Buffer(buffer) => todo!(),
+            Self::Buffer(buffer) => {
+                let start = buffer.as_ptr() as usize;
+                let limit = start + buffer.len();
+                addr >= start && size < (limit - addr)
+            }
+
             Self::Region(region) => {
-                let addr = ptr.as_ptr() as usize;
-                addr >= region.start() as usize && size < (region.limit() - region.start()) as usize
+                addr >= region.start() as usize && size < (region.limit() - addr as u64) as usize
             }
         }
     }

@@ -1,9 +1,10 @@
+use super::page_entry::{self, RawPte, RawPresentPte, RawNotPresentPte, PresentPageFlags};
 use super::{
     map_page, p1_index, p2_index, p3_index, p4_index, ActivePageTable, HierarchyLevel,
-    HyperspaceMapping, MappedPageTable, MappedPageTableMut, PageFlags, PageTable, PageTableEntry,
+    HyperspaceMapping, MappedPageTable, MappedPageTableMut, PageTable,
     PageTableIndex, PageTableLevel, Result, L1, L4,
 };
-use crate::physmem::Frame;
+use crate::physmem::{self, Frame};
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
@@ -68,7 +69,7 @@ pub struct MappedPteReference<L: PageTableLevel> {
 }
 
 impl<L: PageTableLevel> Deref for MappedPteReference<L> {
-    type Target = PageTableEntry;
+    type Target = RawPte;
     fn deref(&self) -> &Self::Target {
         &self.page_table[self.index]
     }
@@ -80,7 +81,7 @@ pub struct MappedMutPteReference<L: PageTableLevel> {
 }
 
 impl<'a, L: PageTableLevel> Deref for MappedMutPteReference<L> {
-    type Target = PageTableEntry;
+    type Target = RawPte;
     fn deref(&self) -> &Self::Target {
         &self.page_table[self.index]
     }
@@ -144,11 +145,39 @@ impl Mapper {
         })
     }
 
-    pub fn map_to(&mut self, page: u64, frame: Frame, flags: PageFlags) -> Result<MapperFlush> {
+    pub fn map_to(&mut self, page: u64, frame: Frame, flags: PresentPageFlags) -> Result<MapperFlush> {
         let mut pte = self.create_pte_mut_for_address(page)?;
 
-        assert!(!pte.flags().contains(PageFlags::PRESENT));
-        *pte = PageTableEntry::from_frame_and_flags(frame, flags | PageFlags::PRESENT);
+        assert_eq!(*pte, RawPte::unused());
+        assert!(pte.is_unused());
+        *pte = RawPresentPte::from_frame_and_flags(frame, flags).into();
+        Ok(MapperFlush::new(page))
+    }
+
+    pub fn unmap_and_free(&mut self, page: u64) -> Result<MapperFlush> {
+        // We can improve this - particularly we can avoid all of the flushing
+        // and not create page tables. Also, we should be able to delete page tables if they're no longer needed
+        let mut pte = self.create_pte_mut_for_address(page)?;
+
+        if pte.is_present() {
+            physmem::deallocate_frame(pte.present().unwrap().frame());
+        }
+
+        *pte = RawPte::unused();
+        Ok(MapperFlush::new(page))
+    }
+
+    pub fn set_not_present(
+        &mut self,
+        page: u64,
+        npp: impl Into<RawNotPresentPte>,
+    ) -> Result<MapperFlush> {
+        let mut pte = self.create_pte_mut_for_address(page)?;
+
+        // We should only be doing this for unused pages
+        assert_eq!(*pte, RawPte::unused());
+        assert!(pte.is_unused());
+        *pte = npp.into().into();
         Ok(MapperFlush::new(page))
     }
 }

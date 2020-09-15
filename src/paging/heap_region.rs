@@ -1,8 +1,9 @@
 use super::{
     lock_page_table, p1_index, p2_index, p3_index, p4_index, ActivePageTable,
-    MappedMutPteReference, MemoryError, PageFlags, PageTable, PageTableEntry, Result, L1, L2,
+    MappedMutPteReference, MemoryError, PageTable, Result, L1, L2,
     PAGE_SIZE,
 };
+use super::page_entry::{self, RawPresentPte, PresentPageFlags};
 use crate::physmem::{allocate_frame, Frame};
 use alloc::vec::Vec;
 use bitflags::bitflags;
@@ -45,64 +46,10 @@ struct RegionManager {
 
 const REGION_ALIGNMENT_PAGES: usize = 16;
 const REGION_CHUNK_SIZE: usize = REGION_ALIGNMENT_PAGES * PAGE_SIZE as usize;
-const REGION_CHUNK_COUNT_BITS: usize = 12;
-const REGION_CHUNK_COUNT_SHIFT: usize = 16;
-const MAX_REGION_CHUNKS: usize = 1 << REGION_CHUNK_COUNT_BITS;
+const MAX_REGION_CHUNKS: usize = RawPresentPte::MAX_COUNTER_VALUE as usize;
 const MAXIMUM_REGION_SIZE: usize = MAX_REGION_CHUNKS * REGION_CHUNK_SIZE;
 
-fn is_region_chunk_aligned(addr: u64) -> bool {
-    (addr as usize & (REGION_CHUNK_SIZE - 1)) == 0
-}
-
-fn make_region_flags_page_flags(region_flags: RegionFlags) -> PageFlags {
-    // Currently we don't use the region flags, but to make sure everything is fine, we set them
-    PageFlags::BIT_62 | PageFlags::BIT_61
-}
-
-fn make_region_chunk_count_flags_flags(
-    region_chunk_count: u64,
-    region_flags: RegionFlags,
-) -> PageFlags {
-    let write_chunk_count = if region_chunk_count == MAX_REGION_CHUNKS as u64 {
-        0
-    } else {
-        assert!(region_chunk_count < MAX_REGION_CHUNKS as u64);
-        region_chunk_count
-    };
-
-    let part_1 = PageFlags::from_bits_truncate((write_chunk_count & 0b000000000111) << 9);
-    let part_2 = PageFlags::from_bits_truncate((write_chunk_count & 0b111111111000) << 49);
-    part_1 | part_2 | make_region_flags_page_flags(region_flags)
-}
-
-fn make_region_header_page_entry(
-    addr: u64,
-    flags: PageFlags,
-    region_chunk_count: u64,
-    region_flags: RegionFlags,
-) -> PageTableEntry {
-    const CHUNK_COUNT_FLAGS: PageFlags =
-        PageFlags::from_bits_truncate((0b111 << 9) | (0b111111111000 << 49));
-
-    PageTableEntry::from_frame_and_flags(
-        Frame::containing_address(addr),
-        (flags & !CHUNK_COUNT_FLAGS)
-            | make_region_chunk_count_flags_flags(region_chunk_count, region_flags),
-    )
-}
-
-fn get_chunks_from_pte(pte: PageTableEntry) -> usize {
-    let flags = pte.flags();
-    let part_1 = (flags.bits() >> 9) & 0b000000000111;
-    let part_2 = (flags.bits() >> 49) & 0b111111111000;
-    if part_1 == 0 && part_2 == 0 {
-        MAX_REGION_CHUNKS
-    } else {
-        (part_1 | part_2) as usize
-    }
-}
-
-struct RegionHeader {
+/*struct RegionHeader {
     pte_1: MappedMutPteReference<L1>,
     pte_2: MappedMutPteReference<L1>,
 }
@@ -144,7 +91,7 @@ impl RegionHeader {
             flags,
         )
     }
-}
+}*/
 
 impl RegionManager {
     pub fn new(base: u64, limit: u64) -> Result<Self> {
@@ -161,16 +108,16 @@ impl RegionManager {
         // the previous chunk size in page 1
         assert!(REGION_ALIGNMENT_PAGES >= 2);
 
-        let mut page_table = unsafe { lock_page_table() }?;
+        /*let mut page_table = unsafe { lock_page_table() }?;
 
         // Create free chunks starting at the base address
-        Self::create_free_region_chain(&mut page_table, base, size_in_region_chunks)?;
+        Self::create_free_region_chain(&mut page_table, base, size_in_region_chunks)?;*/
 
         Ok(RegionManager { base, limit })
     }
 
     pub fn allocate_region(&mut self, required_pages: usize, flags: RegionFlags) -> Result<Region> {
-        let required_chunks =
+        /*let required_chunks =
             align_up(required_pages as usize, REGION_ALIGNMENT_PAGES) / REGION_ALIGNMENT_PAGES;
 
         unsafe { lock_page_table() }.and_then(|mut page_table| {
@@ -205,11 +152,12 @@ impl RegionManager {
             }
 
             Err(MemoryError::NoRegionAddressSpaceAvailable)
-        })
+        })*/
+        todo!()
     }
 
     pub fn release_region(&mut self, start_va: u64, limit_va: u64) {
-        assert_eq!(
+        /*assert_eq!(
             start_va & !(REGION_CHUNK_SIZE as u64 - 1),
             start_va,
             "Invalid start address"
@@ -302,7 +250,8 @@ impl RegionManager {
 
                 Self::create_free_region_chain(&mut page_table, free_chunks_start, free_chunks)
             })
-            .expect("what if this fails!?");
+            .expect("what if this fails!?");*/
+        todo!()
     }
 
     fn split_region(
@@ -312,7 +261,7 @@ impl RegionManager {
         original_chunks: usize,
         new_chunks: usize,
     ) -> Result<()> {
-        let new_region_start = this_region_start + (new_chunks * REGION_CHUNK_SIZE) as u64;
+        /*let new_region_start = this_region_start + (new_chunks * REGION_CHUNK_SIZE) as u64;
         let next_region_start = this_region_start + (original_chunks * REGION_CHUNK_SIZE) as u64;
 
         // Do all the operations that can fail up front
@@ -336,7 +285,8 @@ impl RegionManager {
                 .set_prev_region_size_in_chunks(original_chunks - new_chunks, RegionFlags::empty());
         }
 
-        Ok(())
+        Ok(())*/
+        todo!()
     }
 
     fn create_free_region_chain(
@@ -344,7 +294,7 @@ impl RegionManager {
         start: u64,
         chunks: u64,
     ) -> Result<()> {
-        let mut free_region_start = start;
+        /*let mut free_region_start = start;
         let mut remaining_region_chunks = chunks;
         let mut last_region_chunks = 0;
         while remaining_region_chunks > 0 {
@@ -361,7 +311,8 @@ impl RegionManager {
             free_region_start += (this_region_chunks * REGION_CHUNK_SIZE as u64);
         }
 
-        Ok(())
+        Ok(())*/
+        todo!()
     }
 
     fn map_region(
@@ -370,7 +321,7 @@ impl RegionManager {
         region_start: u64,
         region_chunks: usize,
     ) -> Result<()> {
-        for chunk_index in 0..region_chunks {
+        /*for chunk_index in 0..region_chunks {
             let map_chunk_result: Result<()> = try {
                 let chunk_start = region_start + (chunk_index * REGION_CHUNK_SIZE) as u64;
 
@@ -404,7 +355,8 @@ impl RegionManager {
             }
         }
 
-        Ok(())
+        Ok(())*/
+        todo!()
     }
 
     fn unmap_region(
@@ -413,7 +365,7 @@ impl RegionManager {
         region_start: u64,
         region_chunks: usize,
     ) {
-        let res: Result<()> = try {
+        /*let res: Result<()> = try {
             for page_idx in 0..(region_chunks * REGION_ALIGNMENT_PAGES) {
                 let page_start = region_start + (page_idx as u64 * PAGE_SIZE);
                 let mut pte = page_table.create_pte_mut_for_address(page_start)?;
@@ -437,7 +389,8 @@ impl RegionManager {
             }
         };
 
-        res.expect("What do we do with an error here?")
+        res.expect("What do we do with an error here?")*/
+        todo!()
     }
 }
 

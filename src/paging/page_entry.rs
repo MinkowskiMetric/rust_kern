@@ -4,11 +4,59 @@ use bitflags::bitflags;
 use core::convert::{TryFrom, TryInto};
 use core::fmt;
 use core::marker::PhantomData;
+use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPteError(RawPte);
 
 bitflags! {
-    pub struct PageFlags: u64 {
+    pub struct RawPageFlags: u64 {
         /// Specifies whether the mapped frame or page table is loaded in memory.
-        const PRESENT =         1;
+        const PRESENT = 1;
+    }
+}
+
+// This is a PTE in it's rawest form as understood by the hardware. We do not infer
+// any meaning on to it at all.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RawPte(u64);
+
+impl RawPte {
+    pub fn unused() -> Self {
+        Self(0)
+    }
+
+    pub fn is_unused(&self) -> bool {
+        *self == Self::unused()
+    }
+
+    pub fn flags(&self) -> RawPageFlags {
+        RawPageFlags::from_bits_truncate(self.0)
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.flags().contains(RawPageFlags::PRESENT)
+    }
+
+    pub fn present(self) -> core::result::Result<RawPresentPte, InvalidPteError> {
+        self.try_into()
+    }
+
+    pub fn not_present(self) -> core::result::Result<RawNotPresentPte, InvalidPteError> {
+        self.try_into()
+    }
+}
+
+impl fmt::Debug for RawPte {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!("RawPte({:#x})", self.0))
+    }
+}
+
+bitflags! {
+    pub struct PresentPageFlags: u64 {
         /// Controls whether writes to the mapped frames are allowed.
         ///
         /// If this bit is unset in a level 1 page table entry, the mapped frame is read-only.
@@ -34,33 +82,10 @@ bitflags! {
         const GLOBAL =          1 << 8;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
         const BIT_9 =           1 << 9;
-        const KERNEL_PROTECTED_PML4 = 1 << 9;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
         const BIT_10 =          1 << 10;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
         const BIT_11 =          1 << 11;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_52 =          1 << 52;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_53 =          1 << 53;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_54 =          1 << 54;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_55 =          1 << 55;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_56 =          1 << 56;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_57 =          1 << 57;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_58 =          1 << 58;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_59 =          1 << 59;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_60 =          1 << 60;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_61 =          1 << 61;
-        /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_62 =          1 << 62;
         /// Forbid code execution from the mapped frames.
         ///
         /// Can be only used when the no-execute page protection feature is enabled in the EFER
@@ -69,22 +94,39 @@ bitflags! {
     }
 }
 
+// This is a raw present PTE. We can impose more
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PageTableEntry(u64);
+pub struct RawPresentPte(u64);
 
-impl PageTableEntry {
-    pub const fn unused() -> Self {
-        Self(0)
+impl RawPresentPte {
+    // We allocate some space for a "counter" field. We use the unused flag bits in the page table
+    // entry for these
+    const COUNTER_BITS: u64 = 0x7ff0_0000_0000_0000;
+    const COUNTER_SHIFT: u64 = 52;
+    pub const MAX_COUNTER_VALUE: u16 = ((Self::COUNTER_BITS >> Self::COUNTER_SHIFT) + 1) as u16;
+
+    pub fn from_frame_and_flags(frame: Frame, flags: PresentPageFlags) -> Self {
+        Self::from_frame_flags_and_counter(frame, flags, 0)
     }
 
-    pub fn from_frame_and_flags(frame: Frame, flags: PageFlags) -> Self {
-        Self(frame.physical_address() | flags.bits())
+    pub fn from_frame_flags_and_counter(
+        frame: Frame,
+        flags: PresentPageFlags,
+        counter: u16,
+    ) -> Self {
+        assert!(counter < Self::MAX_COUNTER_VALUE);
+        Self(
+            frame.physical_address()
+                | flags.bits()
+                | RawPageFlags::PRESENT.bits()
+                | ((counter as u64) << Self::COUNTER_SHIFT),
+        )
     }
 
     #[inline]
-    pub const fn flags(&self) -> PageFlags {
-        PageFlags::from_bits_truncate(self.0)
+    pub const fn flags(&self) -> PresentPageFlags {
+        PresentPageFlags::from_bits_truncate(self.0)
     }
 
     #[inline]
@@ -92,67 +134,160 @@ impl PageTableEntry {
         Frame::containing_address(self.0 & 0x000fffff_fffff000)
     }
 
-    pub fn is_present(&self) -> bool {
-        self.flags().contains(PageFlags::WRITABLE)
+    #[inline]
+    pub const fn counter(&self) -> u16 {
+        ((self.0 & Self::COUNTER_BITS) >> Self::COUNTER_SHIFT) as u16
     }
 
-    pub fn is_unused(&self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn set_unused(&mut self) {
-        self.0 = 0;
+    pub fn is_huge(&self) -> bool {
+        self.flags().contains(PresentPageFlags::HUGE_PAGE)
     }
 }
 
-impl fmt::Debug for PageTableEntry {
+impl fmt::Debug for RawPresentPte {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Can probably do better than this
-        f.write_fmt(format_args!("PageTableEntry({:#x})", self.0))
+        f.write_fmt(format_args!("RawPresentPte(frame: {:?} counter: {:#x} flags: {:?})", self.frame(), self.counter(), self.flags()))
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum NotPresentPte {
-    Unused,
-    KernelStackGuardPage { length: u16 },
-    KernelStackSpacePage { length: u16 },
-
-    Uncategorized(PageTableEntry),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidPteError(PageTableEntry);
-
-impl NotPresentPte {
-    pub const fn unused() -> Self {
-        Self::Unused
+impl From<RawPresentPte> for RawPte {
+    fn from(rpp: RawPresentPte) -> Self {
+        Self(rpp.0)
     }
 }
 
-impl From<NotPresentPte> for PageTableEntry {
-    fn from(npp: NotPresentPte) -> Self {
-        match npp {
-            NotPresentPte::Unused => PageTableEntry::unused(),
-            NotPresentPte::Uncategorized(pte) => pte,
-
-            NotPresentPte::KernelStackGuardPage { length } => todo!(),
-            NotPresentPte::KernelStackSpacePage { length } => todo!(),
+impl TryFrom<RawPte> for RawPresentPte {
+    type Error = InvalidPteError;
+    fn try_from(rpte: RawPte) -> core::result::Result<Self, Self::Error> {
+        if rpte.is_present() {
+            Ok(Self(rpte.0))
+        } else {
+            Err(InvalidPteError(rpte))
         }
     }
 }
 
-impl TryFrom<PageTableEntry> for NotPresentPte {
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, ToPrimitive)]
+pub enum NotPresentPageType {
+    Unused = 0,
+    GuardPage = 1,
+}
+
+bitflags! {
+    pub struct NotPresentPageFlags: u64 {
+        /// Available to the OS, can be used to store additional data, e.g. custom flags.
+        const BIT_9 =           1 << 9;
+        /// Available to the OS, can be used to store additional data, e.g. custom flags.
+        const BIT_10 =          1 << 10;
+        /// Available to the OS, can be used to store additional data, e.g. custom flags.
+        const BIT_11 =          1 << 11;
+        /// Forbid code execution from the mapped frames.
+        ///
+        /// Can be only used when the no-execute page protection feature is enabled in the EFER
+        /// register.
+        const NO_EXECUTE =      1 << 63;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RawNotPresentPte(u64);
+
+impl RawNotPresentPte {
+    // We need to keep this 100% consistent with the present entry because if we're using
+    // the counter field in both we need to be able to transfer values
+    const COUNTER_BITS: u64 = RawPresentPte::COUNTER_BITS;
+    const COUNTER_SHIFT: u64 = RawPresentPte::COUNTER_SHIFT;
+    pub const MAX_COUNTER_VALUE: u16 = RawPresentPte::MAX_COUNTER_VALUE;
+
+    const TYPE_BITS: u64 = 0x0000_0000_0000_01fe;
+    const TYPE_SHIFT: u64 = 1;
+
+    pub fn unused() -> Self {
+        Self(0)
+    }
+
+    pub fn is_unused(&self) -> bool {
+        *self == Self::unused()
+    }
+
+    pub fn from_type(page_type: NotPresentPageType) -> Self {
+        Self::from_type_flags_frame_and_counter(page_type, NotPresentPageFlags::empty(), Frame::containing_address(0), 0)
+    }
+
+    pub fn from_type_flags_frame_and_counter(page_type: NotPresentPageType, flags: NotPresentPageFlags, frame: Frame, counter: u16) -> Self {
+        assert!(counter < Self::MAX_COUNTER_VALUE);
+        Self(
+            frame.physical_address()
+                | flags.bits()
+                | (page_type as u64) << Self::TYPE_SHIFT
+                | ((counter as u64) << Self::COUNTER_SHIFT),
+        )
+    }
+
+    pub fn page_type(&self) -> NotPresentPageType {
+        NotPresentPageType::from_u8(((self.0 >> Self::TYPE_SHIFT) & Self::TYPE_BITS) as u8).expect("Invalid PTE type")
+    }
+
+    pub fn flags(&self) -> NotPresentPageFlags {
+        NotPresentPageFlags::from_bits_truncate(self.0)
+    }
+
+    #[inline]
+    pub fn frame(&self) -> Frame {
+        Frame::containing_address(self.0 & 0x000fffff_fffff000)
+    }
+
+    #[inline]
+    pub const fn counter(&self) -> u16 {
+        ((self.0 & Self::COUNTER_BITS) >> Self::COUNTER_SHIFT) as u16
+    }
+}
+
+impl fmt::Debug for RawNotPresentPte {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!("RawNotPresentPte(frame: {:?} counter: {:#x} type: {:?} flags: {:?}", self.frame(), self.counter(), self.page_type(), self.flags()))
+    }
+}
+
+impl From<RawNotPresentPte> for RawPte {
+    fn from(rnp: RawNotPresentPte) -> Self {
+        Self(rnp.0)
+    }
+}
+
+impl TryFrom<RawPte> for RawNotPresentPte {
     type Error = InvalidPteError;
-    fn try_from(pte: PageTableEntry) -> core::result::Result<NotPresentPte, InvalidPteError> {
-        if pte.is_present() {
-            Err(InvalidPteError(pte))
-        } else if pte.is_unused() {
-            Ok(Self::unused())
+    fn try_from(rpte: RawPte) -> core::result::Result<Self, Self::Error> {
+        if rpte.is_present() {
+            Err(InvalidPteError(rpte))
         } else {
-            match pte.flags() {
-                _ => Ok(Self::Uncategorized(pte)),
-            }
+            Ok(Self(rpte.0))
+        }
+    }
+}
+
+pub struct KernelStackGuardPagePte();
+
+impl KernelStackGuardPagePte {
+    pub fn new() -> Self {
+        Self()
+    }
+}
+
+impl From<KernelStackGuardPagePte> for RawNotPresentPte {
+    fn from(_: KernelStackGuardPagePte) -> Self {
+        RawNotPresentPte::from_type(NotPresentPageType::GuardPage)
+    }
+}
+
+impl TryFrom<RawNotPresentPte> for KernelStackGuardPagePte {
+    type Error = InvalidPteError;
+    fn try_from(rpte: RawNotPresentPte) -> core::result::Result<Self, Self::Error> {
+        if rpte.page_type() == NotPresentPageType::GuardPage {
+            Ok(Self())
+        } else {
+            Err(InvalidPteError(rpte.into()))
         }
     }
 }
