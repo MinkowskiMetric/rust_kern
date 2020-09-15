@@ -220,9 +220,7 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         init_page_table,
         (&__tdata_start as *const u8) as u64,
         (&__tdata_end as *const u8) as u64,
-        page_entry::PresentPageFlags::GLOBAL
-            | page_entry::PresentPageFlags::NO_EXECUTE
-            | page_entry::PresentPageFlags::WRITABLE,
+        page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
     );
     copy_boot_mapping(
         boot_info,
@@ -230,9 +228,7 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         init_page_table,
         (&__tbss_start as *const u8) as u64,
         (&__tbss_end as *const u8) as u64,
-        page_entry::PresentPageFlags::GLOBAL
-            | page_entry::PresentPageFlags::NO_EXECUTE
-            | page_entry::PresentPageFlags::WRITABLE,
+        page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
     );
     copy_boot_mapping(
         boot_info,
