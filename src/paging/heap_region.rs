@@ -1,9 +1,8 @@
+use super::page_entry::{self, PresentPageFlags, RawPresentPte};
 use super::{
     lock_page_table, p1_index, p2_index, p3_index, p4_index, ActivePageTable,
-    MappedMutPteReference, MemoryError, PageTable, Result, L1, L2,
-    PAGE_SIZE,
+    MappedMutPteReference, MemoryError, PageTable, Result, L1, L2, PAGE_SIZE,
 };
-use super::page_entry::{self, RawPresentPte, PresentPageFlags};
 use crate::physmem::{allocate_frame, Frame};
 use alloc::vec::Vec;
 use bitflags::bitflags;

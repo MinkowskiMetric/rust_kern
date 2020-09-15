@@ -116,3 +116,25 @@ pub unsafe fn init() {
     segmentation::load_gs(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
     segmentation::load_ss(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
 }
+
+#[thread_local]
+static HMM: u8 = 42;
+
+pub unsafe fn init_post_paging(tcb_offset: usize) {
+    extern "C" {
+        static __tdata_start: u8;
+    }
+
+    use x86::msr::{wrmsr, IA32_FS_BASE};
+    wrmsr(IA32_FS_BASE, tcb_offset as u64);
+
+    use crate::println;
+    println!(
+        "tcb_offset: {:#x} &HMM: {:#x} HMM: {}",
+        tcb_offset, &HMM as *const _ as usize, HMM
+    );
+    println!(
+        "tdata_start: {:#x} {}",
+        &__tdata_start as *const _ as usize, __tdata_start
+    );
+}

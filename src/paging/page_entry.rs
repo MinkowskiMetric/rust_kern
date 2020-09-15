@@ -146,7 +146,12 @@ impl RawPresentPte {
 
 impl fmt::Debug for RawPresentPte {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_fmt(format_args!("RawPresentPte(frame: {:?} counter: {:#x} flags: {:?})", self.frame(), self.counter(), self.flags()))
+        f.write_fmt(format_args!(
+            "RawPresentPte(frame: {:?} counter: {:#x} flags: {:?})",
+            self.frame(),
+            self.counter(),
+            self.flags()
+        ))
     }
 }
 
@@ -212,10 +217,20 @@ impl RawNotPresentPte {
     }
 
     pub fn from_type(page_type: NotPresentPageType) -> Self {
-        Self::from_type_flags_frame_and_counter(page_type, NotPresentPageFlags::empty(), Frame::containing_address(0), 0)
+        Self::from_type_flags_frame_and_counter(
+            page_type,
+            NotPresentPageFlags::empty(),
+            Frame::containing_address(0),
+            0,
+        )
     }
 
-    pub fn from_type_flags_frame_and_counter(page_type: NotPresentPageType, flags: NotPresentPageFlags, frame: Frame, counter: u16) -> Self {
+    pub fn from_type_flags_frame_and_counter(
+        page_type: NotPresentPageType,
+        flags: NotPresentPageFlags,
+        frame: Frame,
+        counter: u16,
+    ) -> Self {
         assert!(counter < Self::MAX_COUNTER_VALUE);
         Self(
             frame.physical_address()
@@ -226,7 +241,8 @@ impl RawNotPresentPte {
     }
 
     pub fn page_type(&self) -> NotPresentPageType {
-        NotPresentPageType::from_u8(((self.0 >> Self::TYPE_SHIFT) & Self::TYPE_BITS) as u8).expect("Invalid PTE type")
+        NotPresentPageType::from_u8(((self.0 >> Self::TYPE_SHIFT) & Self::TYPE_BITS) as u8)
+            .expect("Invalid PTE type")
     }
 
     pub fn flags(&self) -> NotPresentPageFlags {
@@ -246,7 +262,13 @@ impl RawNotPresentPte {
 
 impl fmt::Debug for RawNotPresentPte {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_fmt(format_args!("RawNotPresentPte(frame: {:?} counter: {:#x} type: {:?} flags: {:?}", self.frame(), self.counter(), self.page_type(), self.flags()))
+        f.write_fmt(format_args!(
+            "RawNotPresentPte(frame: {:?} counter: {:#x} type: {:?} flags: {:?}",
+            self.frame(),
+            self.counter(),
+            self.page_type(),
+            self.flags()
+        ))
     }
 }
 

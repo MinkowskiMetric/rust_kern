@@ -2,13 +2,13 @@ use super::page_entry::{self, PresentPageFlags};
 use super::{lock_page_table, Mapper, MapperFlushAll, MemoryError, Result, PAGE_SIZE};
 use crate::init_mutex::InitMutex;
 use crate::physmem::{allocate_frame, Frame};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::{vec, vec::Vec};
 use core::fmt;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use spin::Mutex;
-use alloc::boxed::Box;
 
 pub const DEFAULT_KERNEL_STACK_PAGES: usize = 8;
 
@@ -94,12 +94,16 @@ impl StackManager {
                         start_va as u64,
                         page_entry::KernelStackGuardPagePte::new(),
                     )?);
-                    
+
                     for page in (1..pages) {
                         let page = start_va + (page * PAGE_SIZE as usize);
                         let frame = allocate_frame().ok_or(MemoryError::OutOfMemory)?;
 
-                        flusher.consume(page_table.map_to(page as u64, frame, PresentPageFlags::WRITABLE | PresentPageFlags::NO_EXECUTE)?);
+                        flusher.consume(page_table.map_to(
+                            page as u64,
+                            frame,
+                            PresentPageFlags::WRITABLE | PresentPageFlags::NO_EXECUTE,
+                        )?);
                     }
 
                     KernelStack::new(start_va, limit_va)
@@ -118,7 +122,14 @@ impl StackManager {
 
     pub fn release_kernel_stack(&mut self, start_va: usize, limit_va: usize) -> Result<()> {
         // We're only interested in an exact match (we could do a binary search here since we know the list is ordered. Later)
-        let (range_index, _) = self.ranges.iter().enumerate().find(|(_, range)| range.base_va == start_va && range.limit_va == limit_va && !range.available).ok_or(MemoryError::InvalidStack)?;
+        let (range_index, _) = self
+            .ranges
+            .iter()
+            .enumerate()
+            .find(|(_, range)| {
+                range.base_va == start_va && range.limit_va == limit_va && !range.available
+            })
+            .ok_or(MemoryError::InvalidStack)?;
 
         use crate::println;
         println!("BEFORE: {} {:?}", range_index, self.ranges);
@@ -139,7 +150,8 @@ impl StackManager {
                 flusher.flush(&page_table);
 
                 result
-            }).expect("Failed to unmap pages");      // Don't propagate this error. If unmapping fails we're in trouble
+            })
+            .expect("Failed to unmap pages"); // Don't propagate this error. If unmapping fails we're in trouble
 
         let range_index = if range_index > 0 && self.ranges[range_index - 1].available {
             // We can join this range up with the previous range
@@ -205,13 +217,15 @@ fn switch_to_trampoline(trampoline: Box<dyn TrampolineCallable>) -> ! {
     let trampoline = box trampoline;
     let trampoline = Box::into_raw(trampoline);
 
-    unsafe { asm!(
-        "mov rsp, {0}",
-        "mov rdi, {1}",
-        "jmp stack_switch_entry",
-        in(reg) stack_pointer,
-        in(reg) trampoline as usize,
-    ) }
+    unsafe {
+        asm!(
+            "mov rsp, {0}",
+            "mov rdi, {1}",
+            "jmp stack_switch_entry",
+            in(reg) stack_pointer,
+            in(reg) trampoline as usize,
+        )
+    }
 
     panic!()
 }
@@ -220,7 +234,7 @@ impl KernelStack {
     pub fn new(start_va: usize, limit_va: usize) -> Self {
         Self { start_va, limit_va }
     }
-    
+
     pub fn stack_top(&self) -> usize {
         self.limit_va
     }
@@ -229,7 +243,10 @@ impl KernelStack {
         use crate::println;
         println!("SWITCHING TO STACK!!!");
 
-        let trampoline = box Trampoline { stack: self, function };
+        let trampoline = box Trampoline {
+            stack: self,
+            function,
+        };
         switch_to_trampoline(trampoline);
     }
 }

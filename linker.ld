@@ -1,50 +1,65 @@
-SECTIONS
-{
-    . = 0xFFFF800080000000;
+ENTRY(_start)
+OUTPUT_FORMAT(elf64-x86-64)
+
+KERNEL_OFFSET = 0xFFFF800080000000;
+
+SECTIONS {
+    . = KERNEL_OFFSET;
+
+    . += SIZEOF_HEADERS;
+    . = ALIGN(4096);
 
     __kernel_start = .;
-    __kernel_rodata_start = .;
-    .rodata : ALIGN(0x1000)
-    {
-        *(.rodata*)
-    }
 
-    __kernel_rodata_end = .;
-    
-    __kernel_text_start = .;
-
-    .text : ALIGN(0x1000) {
+    .text : {
+        __text_start = .;
         *(.text*)
-    } = 0x90909090
-
-    __kernel_text_start = .;
-
-    .data..percpu : ALIGN(0x1000)
-    {
-        __kernel_per_cpu_start = .;
-        *(.data..percpu)
-        __kernel_per_cpu_end = .;
+        . = ALIGN(4096);
+        __text_end = .;
     }
 
-    __kernel_data_start = .;
+    .rodata : {
+        __rodata_start = .;
+        *(.rodata*)
+        . = ALIGN(4096);
+        __rodata_end = .;
+    }
 
-    .data : ALIGN(0x1000)
-    {
+    .data : {
+        __data_start = .;
         *(.data*)
+        *(.got*)
+        . = ALIGN(4096);
+        __data_end = .;
     }
 
-    __kernel_data_end = .;
-
-    .got : ALIGN(0x1000)
-    {
-        *(.got)
+    .tdata : {
+        __tdata_start = .;
+        *(.tdata*)
+        . = ALIGN(4096);
+        __tdata_end = .;
+        __tbss_start = .;
+        *(.tbss*)
+        . += 8;
+        . = ALIGN(4096);
+        __tbss_end = .;
     }
 
-    .bss : ALIGN(0x1000)
-    {
-        *(.bss)
+    .bss : {
+        __bss_start = .;
+        *(.bss*)
+        . = ALIGN(4096);
+        __bss_end = .;
     }
-
+    
     . = ALIGN(0x1000);
     __kernel_end = .;
+
+    /DISCARD/ : {
+        *(.comment*)
+        *(.eh_frame*)
+        *(.gcc_except_table*)
+        *(.note*)
+        *(.rel.eh_frame*)
+    }
 }
