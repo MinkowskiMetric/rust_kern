@@ -174,9 +174,6 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
     let boot_stack_start = 0x10000000 + PAGE_SIZE;
     let boot_stack_end = boot_stack_start + (PAGE_SIZE * 8);
 
-    let boot_info_start = 0x20000000;
-    let boot_info_end = boot_info_start + PAGE_SIZE;
-
     // How do we get hold of the bootloader page table. Fortunately, the bootloader identity maps
     // enough physical memory that we can access it directly like this.
     let bootloader_page_table =

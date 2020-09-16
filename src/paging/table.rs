@@ -91,59 +91,6 @@ impl From<TryFromIntError> for InvalidPageOffset {
     }
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PageOffset(u16);
-
-impl PageOffset {
-    pub const fn new_truncate(val: u16) -> Self {
-        Self(val % 4096)
-    }
-
-    pub const unsafe fn new_unchecked(val: u16) -> Self {
-        Self(val)
-    }
-}
-
-impl fmt::Debug for PageOffset {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_fmt(format_args!("PageOffset({:#x})", self.0))
-    }
-}
-
-macro_rules! page_offset_conversions (
-    () => { };
-    ($t:ty $(, $others:ty)* $(,)?) => {
-        page_offset_conversions!($($others),*);
-
-        impl TryFrom<$t> for PageOffset {
-            type Error = InvalidPageOffset;
-
-            fn try_from(val: $t) -> core::result::Result<Self, Self::Error> {
-                let val = u16::try_from(val)?;
-
-                if val < 4096 {
-                    Ok(Self(val))
-                } else {
-                    Err(InvalidPageOffset(()))
-                }
-            }
-        }
-
-        impl From<PageOffset> for $t {
-            fn from(val: PageOffset) -> Self {
-                val.0.into()
-            }
-        }
-    }
-);
-
-page_offset_conversions!(u16, u32, u64, usize,);
-
-pub const fn page_offset(va: u64) -> PageOffset {
-    PageOffset::new_truncate(va as u16)
-}
-
 pub const fn p1_index(va: u64) -> PageTableIndex {
     PageTableIndex::new_truncate((va >> 12) as u16)
 }

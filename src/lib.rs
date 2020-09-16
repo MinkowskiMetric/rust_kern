@@ -30,7 +30,6 @@ pub mod mm;
 pub mod paging;
 pub mod physmem;
 pub mod serial;
-pub mod types;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;

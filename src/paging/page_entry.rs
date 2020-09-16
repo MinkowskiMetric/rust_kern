@@ -1,11 +1,9 @@
-use super::{PageTable, PageTableLevel};
 use crate::physmem::Frame;
 use bitflags::bitflags;
 use core::convert::{TryFrom, TryInto};
 use core::fmt;
-use core::marker::PhantomData;
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidPteError(RawPte);

@@ -1,11 +1,12 @@
-use super::page_entry::{self, PresentPageFlags, RawPresentPte};
+use super::Result;
+use bitflags::bitflags;
+/*use super::page_entry::{self, PresentPageFlags, RawPresentPte};
 use super::{
     lock_page_table, p1_index, p2_index, p3_index, p4_index, ActivePageTable,
     MappedMutPteReference, MemoryError, PageTable, Result, L1, L2, PAGE_SIZE,
 };
 use crate::physmem::{allocate_frame, Frame};
 use alloc::vec::Vec;
-use bitflags::bitflags;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use spin::Mutex;
@@ -24,18 +25,18 @@ fn align_down(addr: usize, align: usize) -> usize {
 /// so that x >= addr. The alignment must be a power of 2.
 fn align_up(addr: usize, align: usize) -> usize {
     align_down(addr + align - 1, align)
-}
+}*/
 
 bitflags! {
     pub struct RegionFlags: u64 {
-        const NON_PAGES = 1 << 0;
+        const PAGED = 1 << 0;
     }
 }
 
-struct RegionManager {
+/*struct RegionManager {
     base: u64,
     limit: u64,
-}
+}*/
 
 // There are 14 free bits in an allocated page entry. We need to use some of those for flags.
 // So, how big can a region be. Lets say we save two bits for flags. That leaves us 12 bits.
@@ -43,10 +44,10 @@ struct RegionManager {
 // which ought to be big enough for anyone. It isn't enough to cover the whole heap region though,
 // so the search needs to take that into account
 
-const REGION_ALIGNMENT_PAGES: usize = 16;
+/*const REGION_ALIGNMENT_PAGES: usize = 16;
 const REGION_CHUNK_SIZE: usize = REGION_ALIGNMENT_PAGES * PAGE_SIZE as usize;
 const MAX_REGION_CHUNKS: usize = RawPresentPte::MAX_COUNTER_VALUE as usize;
-const MAXIMUM_REGION_SIZE: usize = MAX_REGION_CHUNKS * REGION_CHUNK_SIZE;
+const MAXIMUM_REGION_SIZE: usize = MAX_REGION_CHUNKS * REGION_CHUNK_SIZE;*/
 
 /*struct RegionHeader {
     pte_1: MappedMutPteReference<L1>,
@@ -92,7 +93,7 @@ impl RegionHeader {
     }
 }*/
 
-impl RegionManager {
+/*impl RegionManager {
     pub fn new(base: u64, limit: u64) -> Result<Self> {
         // Base needs to be an even page index to ensure that the first and second pages
         // as in the same L1 table
@@ -417,7 +418,7 @@ fn lock_region_manager<'a>() -> RegionManagerLock<'a> {
     RegionManagerLock {
         guard: REGION_MANAGER.lock(),
     }
-}
+}*/
 
 pub struct Region {
     start_va: u64,
@@ -449,17 +450,18 @@ impl Region {
     }
 }
 
-impl Drop for Region {
+/*impl Drop for Region {
     fn drop(&mut self) {
         lock_region_manager().release_region(self.start_va, self.limit_va);
     }
-}
+}*/
 
-pub unsafe fn init(base: u64, limit: u64) -> Result<()> {
-    *REGION_MANAGER.lock() = Some(RegionManager::new(base, limit)?);
+pub unsafe fn init(_base: u64, _limit: u64) -> Result<()> {
+    //*REGION_MANAGER.lock() = Some(RegionManager::new(base, limit)?);
     Ok(())
 }
 
-pub fn allocate_region(pages: usize, flags: RegionFlags) -> Result<Region> {
-    lock_region_manager().allocate_region(pages, flags)
+pub fn allocate_region(_pages: usize, _flags: RegionFlags) -> Result<Region> {
+    //lock_region_manager().allocate_region(pages, flags)
+    todo!("Regions aren't implemented yet")
 }

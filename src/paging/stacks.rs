@@ -1,14 +1,11 @@
 use super::page_entry::{self, PresentPageFlags};
-use super::{lock_page_table, Mapper, MapperFlushAll, MemoryError, Result, PAGE_SIZE};
+use super::{lock_page_table, MapperFlushAll, MemoryError, Result, PAGE_SIZE};
 use crate::init_mutex::InitMutex;
-use crate::physmem::{allocate_frame, Frame};
+use crate::physmem::allocate_frame;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::{vec, vec::Vec};
 use core::fmt;
-use core::mem::MaybeUninit;
-use core::ops::{Deref, DerefMut};
-use spin::Mutex;
 
 pub const DEFAULT_KERNEL_STACK_PAGES: usize = 8;
 
@@ -95,7 +92,7 @@ impl StackManager {
                         page_entry::KernelStackGuardPagePte::new(),
                     )?);
 
-                    for page in (1..pages) {
+                    for page in 1..pages {
                         let page = start_va + (page * PAGE_SIZE as usize);
                         let frame = allocate_frame().ok_or(MemoryError::OutOfMemory)?;
 
@@ -224,10 +221,9 @@ fn switch_to_trampoline(trampoline: Box<dyn TrampolineCallable>) -> ! {
             "jmp stack_switch_entry",
             in(reg) stack_pointer,
             in(reg) trampoline as usize,
+            options(noreturn),
         )
     }
-
-    panic!()
 }
 
 impl KernelStack {
@@ -240,9 +236,6 @@ impl KernelStack {
     }
 
     pub fn switch_to_permanent(self, function: impl FnOnce(KernelStack) -> ! + 'static) -> ! {
-        use crate::println;
-        println!("SWITCHING TO STACK!!!");
-
         let trampoline = box Trampoline {
             stack: self,
             function,

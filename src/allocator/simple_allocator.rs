@@ -1,12 +1,11 @@
 use crate::paging::{allocate_region, Region, RegionFlags, PAGE_SIZE};
 use core::alloc::{GlobalAlloc, Layout};
-use core::mem::{align_of, size_of, MaybeUninit};
-use core::ops::{Deref, DerefMut};
+use core::mem::{align_of, size_of};
 use core::ptr::{null_mut, NonNull};
 use spin::Mutex;
 
 const MINIMUM_HEAP_REGION_PAGES: usize = 16;
-const MINIMUM_HEAP_REGION_SIZE: usize = (MINIMUM_HEAP_REGION_PAGES * PAGE_SIZE as usize);
+const MINIMUM_HEAP_REGION_SIZE: usize = MINIMUM_HEAP_REGION_PAGES * PAGE_SIZE as usize;
 
 // When we have an empty region, we don't release it back if our free space is less than this
 const HEAP_RESERVE_LIMIT: usize = 128; // * 1024;
@@ -47,17 +46,6 @@ struct FreeList {
 }
 
 impl FreeList {
-    pub const fn empty() -> Self {
-        Self {
-            head: FreeNode {
-                size: 0,
-                next: None,
-            },
-            allocated_space: 0,
-            free_space: 0,
-        }
-    }
-
     pub unsafe fn new(start: u64, limit: u64) -> Self {
         // This should be a no-op since the allocation should come from the page
         // allocator and be page aligned, but it does not hurt to be safe
@@ -124,7 +112,7 @@ impl FreeList {
             if let Some(allocation) = allocation {
                 // So, remove the free node from the list and return the allocation descriptor
                 let remove_node = prev_node.next.as_mut().unwrap();
-                prev_node.next = prev_node.next.as_mut().unwrap().next.take();
+                prev_node.next = remove_node.next.take();
                 return Some(allocation);
             } else if prev_node.next.is_some() {
                 prev_node = prev_node.next.as_mut().unwrap();
@@ -412,19 +400,6 @@ impl HeapRegionList {
         }
     }
 
-    pub fn region_count(&self) -> usize {
-        let mut prev_region = &self.head;
-        let mut region_count = 0;
-        loop {
-            region_count += prev_region.next.as_ref().map(|_| 1).unwrap_or(0);
-            if prev_region.next.is_some() {
-                prev_region = prev_region.next.as_ref().unwrap();
-            } else {
-                return region_count;
-            }
-        }
-    }
-
     unsafe fn expand_and_allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         // The smallest possible region that this could fit in is the size of a region
         // header, plus whatever padding needed to get to alignment, plus the size of the
@@ -469,20 +444,19 @@ impl HeapRegionList {
                 assert!(size >= size_of::<HeapRegion>());
 
                 let ptr = aligned_start as *mut HeapRegion;
-                unsafe {
-                    ptr.write(HeapRegion {
-                        payload: Some(HeapRegionPayload {
-                            alloc_region: PayloadRegionAlloc::from_region(region),
-                            can_free: true,
-                            free_list: unsafe {
-                                FreeList::new(aligned_start + size_of::<HeapRegion>() as u64, limit)
-                            },
-                        }),
-                        next: self.head.next.take(),
-                    })
-                };
+                ptr.write(HeapRegion {
+                    payload: Some(HeapRegionPayload {
+                        alloc_region: PayloadRegionAlloc::from_region(region),
+                        can_free: true,
+                        free_list: FreeList::new(
+                            aligned_start + size_of::<HeapRegion>() as u64,
+                            limit,
+                        ),
+                    }),
+                    next: self.head.next.take(),
+                });
 
-                self.head.next = Some(unsafe { &mut *ptr });
+                self.head.next = Some(&mut *ptr);
 
                 self.head
                     .next
@@ -580,13 +554,6 @@ impl HeapRegion {
             .and_then(|payload| payload.deallocate(ptr, layout))
     }
 
-    pub fn contains(&self, ptr: NonNull<u8>, size: usize) -> bool {
-        self.payload
-            .as_ref()
-            .map(|payload| payload.contains(ptr, size))
-            .unwrap_or(false)
-    }
-
     pub fn free_space(&self) -> usize {
         self.payload
             .as_ref()
@@ -636,7 +603,7 @@ impl SimpleAllocator {
             static mut INITIAL_HEAP_REGION: InitialHeapBuffer =
                 InitialHeapBuffer([0; INITIAL_HEAP_REGION_SIZE]);
 
-            let region_start = unsafe { ((&mut INITIAL_HEAP_REGION.0[0] as *mut u8) as usize) };
+            let region_start = unsafe { (&mut INITIAL_HEAP_REGION.0[0] as *mut u8) as usize };
             let region_end = region_start + INITIAL_HEAP_REGION_SIZE;
 
             let aligned_start = align_up(region_start, align_of::<HeapRegion>());
@@ -667,6 +634,14 @@ impl SimpleAllocator {
                 }),
             }
         }
+    }
+
+    pub fn allocated_space(&self) -> usize {
+        self.head_region.lock().allocated_space()
+    }
+
+    pub fn free_space(&self) -> usize {
+        self.head_region.lock().free_space()
     }
 }
 

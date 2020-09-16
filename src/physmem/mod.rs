@@ -1,8 +1,7 @@
-use crate::println;
+use crate::init_mutex::InitMutex;
 use bootloader::{bootinfo::MemoryRegionType, BootInfo};
 use bump::BumpAllocator;
 use core::fmt;
-use spin::Mutex;
 
 mod bump;
 
@@ -104,20 +103,16 @@ impl<SrcAllocator: FrameAllocator> FrameAllocator for LeakAllocator<SrcAllocator
     }
 }
 
-static ALLOCATOR: Mutex<Option<LeakAllocator<BumpAllocator>>> = Mutex::new(None);
+static ALLOCATOR: InitMutex<LeakAllocator<BumpAllocator>> = InitMutex::new();
 
 pub unsafe fn init(boot_info: &BootInfo) {
     let mut mem_position = 0;
-    let mut total_available_memory = 0;
-    let mut total_pending_memory = 0;
-    let mut has_skipped_regions = false;
 
     // We make multiple passes over the memory map. We place the immediately usable memory on the memory map first
     // then we put the stuff we can reclaim after
     for memory_region in boot_info.memory_map.iter() {
         if memory_region.region_type == MemoryRegionType::Usable {
             if mem_position >= MAX_MEMORY_AREAS {
-                has_skipped_regions = true;
                 break;
             }
             MEMORY_MAP[mem_position] = MemoryArea {
@@ -125,10 +120,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
                 limit: memory_region.range.end_addr(),
                 mem_type: MemoryAreaType::Usable,
             };
-            println!("{:?}", MEMORY_MAP[mem_position]);
             mem_position += 1;
-            total_available_memory +=
-                memory_region.range.end_addr() - memory_region.range.start_addr();
         }
     }
 
@@ -140,7 +132,6 @@ pub unsafe fn init(boot_info: &BootInfo) {
             || memory_region.region_type == MemoryRegionType::Package
         {
             if mem_position >= MAX_MEMORY_AREAS {
-                has_skipped_regions = true;
                 break;
             }
             MEMORY_MAP[mem_position] = MemoryArea {
@@ -149,41 +140,12 @@ pub unsafe fn init(boot_info: &BootInfo) {
                 mem_type: MemoryAreaType::Reclaimable,
             };
             mem_position += 1;
-            total_pending_memory +=
-                memory_region.range.end_addr() - memory_region.range.start_addr();
-        } else if memory_region.region_type != MemoryRegionType::Usable {
-            println!("Ignoring memory region {:?}", memory_region);
         }
     }
 
-    if has_skipped_regions {
-        println!("Out of memory regions - some available regions were skipped");
-    }
-
-    println!("Total available memory: {} bytes", total_available_memory);
-    println!("Total pending memory: {} bytes", total_pending_memory);
-
-    *ALLOCATOR.lock() = Some(LeakAllocator::new(BumpAllocator::new(
+    ALLOCATOR.init(LeakAllocator::new(BumpAllocator::new(
         MemoryMapIterator::new(MemoryAreaType::Usable),
     )));
-}
-
-macro_rules! check_allocator {
-    { |ref $alloc:ident| $code:expr } => {
-        if let Some(ref $alloc) = *ALLOCATOR.lock() {
-            $code
-        } else {
-            panic!("frame allocator not initialized");
-        }
-    };
-
-    { |ref mut $alloc:ident| $code:expr } => {
-        if let Some(ref mut $alloc) = *ALLOCATOR.lock() {
-            $code
-        } else {
-            panic!("frame allocator not initialized");
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -210,19 +172,19 @@ impl fmt::Debug for Frame {
 }
 
 pub fn free_frames() -> usize {
-    check_allocator! { |ref allocator| allocator.free_frames() }
+    ALLOCATOR.lock().free_frames()
 }
 
 pub fn used_frames() -> usize {
-    check_allocator! { |ref allocator| allocator.used_frames() }
+    ALLOCATOR.lock().used_frames()
 }
 
 pub fn allocate_frame() -> Option<Frame> {
-    check_allocator! { |ref mut allocator| allocator.allocate_frame() }
+    ALLOCATOR.lock().allocate_frame()
 }
 
 pub fn deallocate_frame(frame: Frame) {
-    check_allocator! { |ref mut allocator| allocator.deallocate_frame(frame) }
+    ALLOCATOR.lock().deallocate_frame(frame)
 }
 
 pub trait FrameAllocator {

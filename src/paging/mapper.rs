@@ -1,8 +1,7 @@
-use super::page_entry::{self, PresentPageFlags, RawNotPresentPte, RawPresentPte, RawPte};
+use super::page_entry::{PresentPageFlags, RawNotPresentPte, RawPresentPte, RawPte};
 use super::{
-    map_page, p1_index, p2_index, p3_index, p4_index, ActivePageTable, HierarchyLevel,
-    HyperspaceMapping, MappedPageTable, MappedPageTableMut, PageTable, PageTableIndex,
-    PageTableLevel, Result, L1, L4,
+    map_page, p1_index, p2_index, p3_index, p4_index, ActivePageTable, HyperspaceMapping,
+    MappedPageTable, MappedPageTableMut, PageTable, PageTableIndex, PageTableLevel, Result, L1, L4,
 };
 use crate::physmem::{self, Frame};
 use core::mem::ManuallyDrop;
@@ -133,7 +132,7 @@ impl Mapper {
     }
 
     pub fn create_pte_mut_for_address(&mut self, addr: u64) -> Result<MappedMutPteReference<L1>> {
-        let mut p1 = self
+        let p1 = self
             .p4_mut()
             .create_next_table(p4_index(addr))?
             .create_next_table(p3_index(addr))?
