@@ -6,7 +6,7 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidPteError(RawPte);
+pub struct InvalidPteError(pub RawPte);
 
 bitflags! {
     pub struct RawPageFlags: u64 {
@@ -79,7 +79,7 @@ bitflags! {
         /// the TLB on an address space switch.
         const GLOBAL =          1 << 8;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
-        const BIT_9 =           1 << 9;
+        const REGION_HEADER =   1 << 9;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
         const BIT_10 =          1 << 10;
         /// Available to the OS, can be used to store additional data, e.g. custom flags.
@@ -175,6 +175,7 @@ impl TryFrom<RawPte> for RawPresentPte {
 pub enum NotPresentPageType {
     Unused = 0,
     GuardPage = 1,
+    RegionHeader = 2,
 }
 
 bitflags! {
@@ -220,6 +221,15 @@ impl RawNotPresentPte {
             NotPresentPageFlags::empty(),
             Frame::containing_address(0),
             0,
+        )
+    }
+
+    pub fn from_type_and_counter(page_type: NotPresentPageType, counter: u16) -> Self {
+        Self::from_type_flags_frame_and_counter(
+            page_type,
+            NotPresentPageFlags::empty(),
+            Frame::containing_address(0),
+            counter,
         )
     }
 

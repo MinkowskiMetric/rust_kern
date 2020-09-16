@@ -52,6 +52,44 @@ unsafe fn init_post_paging(
 
     gdt::init_post_paging(tcb_offset, &idle_thread_stack, &fault_stack);
 
+    println!(
+        "Before stress - heap size {} bytes - free size {} bytes",
+        allocator::allocated_space(),
+        allocator::free_space()
+    );
+    // Stress the heap a bit
+    use alloc::vec;
+    let mut a = vec![box 17; 1024];
+    for i in 0..3 {
+        println!(
+            "Iteration {} - heap size {} bytes - free size {} bytes",
+            i,
+            allocator::allocated_space(),
+            allocator::free_space()
+        );
+        let b: Vec<_> = a.iter().cloned().collect();
+        a.extend(b);
+    }
+
+    println!(
+        "Before decimate - heap size {} bytes - free size {} bytes",
+        allocator::allocated_space(),
+        allocator::free_space()
+    );
+    a = a.iter().step_by(2).cloned().collect();
+    println!(
+        "After decimate - heap size {} bytes - free size {} bytes",
+        allocator::allocated_space(),
+        allocator::free_space()
+    );
+
+    core::mem::drop(a);
+    println!(
+        "After drop - heap size {} bytes - free size {} bytes",
+        allocator::allocated_space(),
+        allocator::free_space()
+    );
+
     todo!("This would be the idle loop");
     //loop {}
 }

@@ -1,4 +1,4 @@
-use crate::paging::{allocate_region, Region, RegionFlags, PAGE_SIZE};
+use crate::paging::{allocate_region, Region, PAGE_SIZE};
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
 use core::ptr::{null_mut, NonNull};
@@ -46,12 +46,12 @@ struct FreeList {
 }
 
 impl FreeList {
-    pub unsafe fn new(start: u64, limit: u64) -> Self {
+    pub unsafe fn new(start: usize, limit: usize) -> Self {
         // This should be a no-op since the allocation should come from the page
         // allocator and be page aligned, but it does not hurt to be safe
-        let aligned_start = align_up(start as usize, align_of::<FreeNode>()) as u64;
+        let aligned_start = align_up(start, align_of::<FreeNode>());
         // And we should definitely be able to fit a free node in the list
-        let size = limit.saturating_sub(aligned_start) as usize;
+        let size = limit.saturating_sub(aligned_start);
         assert!(size >= size_of::<FreeNode>());
 
         let ptr = aligned_start as *mut FreeNode;
@@ -316,21 +316,25 @@ impl HeapRegionList {
 
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, original_layout: Layout) {
         Self::align_layout(original_layout).map(|aligned_layout| {
-            if let Some(mut removed_region) =
+            if let Some(mut removed_region_list) =
                 Self::do_deallocate(&mut self.head, ptr, aligned_layout)
             {
+                let (removed_region_can_free, removed_region_free_space) = {
+                    let removed_region = removed_region_list.next.as_ref().unwrap();
+                    (removed_region.can_free(), removed_region.free_space())
+                };
+
                 // If we have enough free space, then we do not need to keep this region around and we can drop it.
                 // But, we don't want to keep really big regions around, so if the regions free space is larger than
                 // the default space we always drop it
-                if !removed_region.can_free()
-                    || (removed_region.next.as_mut().unwrap().free_space()
-                        < MINIMUM_HEAP_REGION_SIZE
+                if !removed_region_can_free
+                    || (removed_region_free_space < MINIMUM_HEAP_REGION_SIZE
                         && self.free_space() < HEAP_RESERVE_LIMIT)
                 {
-                    removed_region.next.as_mut().unwrap().next = self.head.next.take();
-                    self.head.next = removed_region.next.take();
+                    removed_region_list.next.as_mut().unwrap().next = self.head.next.take();
+                    self.head.next = removed_region_list.next.take();
                 } else {
-                    core::ptr::drop_in_place(removed_region.next.unwrap() as *mut HeapRegion);
+                    core::ptr::drop_in_place(removed_region_list.next.unwrap() as *mut HeapRegion);
                 }
             }
         });
@@ -431,40 +435,35 @@ impl HeapRegionList {
         let allocation_size = (required_size + back_padding_size).max(MINIMUM_HEAP_REGION_SIZE);
         let allocation_pages = allocation_size / PAGE_SIZE as usize;
 
-        allocate_region(allocation_pages, RegionFlags::empty())
-            .ok()
-            .map(|region| {
-                let (start, limit) = (region.start(), region.limit());
+        allocate_region(allocation_pages).ok().map(|region| {
+            let (start, limit) = (region.start(), region.limit());
 
-                // This should be a no-op since the allocation should come from the page
-                // allocator and be page aligned, but it does not hurt to be safe
-                let aligned_start = align_up(start as usize, align_of::<HeapRegion>()) as u64;
-                // And we should definitely be able to fit a free node in the list
-                let size = limit.saturating_sub(aligned_start) as usize;
-                assert!(size >= size_of::<HeapRegion>());
+            // This should be a no-op since the allocation should come from the page
+            // allocator and be page aligned, but it does not hurt to be safe
+            let aligned_start = align_up(start, align_of::<HeapRegion>());
+            // And we should definitely be able to fit a free node in the list
+            let size = limit.saturating_sub(aligned_start);
+            assert!(size >= size_of::<HeapRegion>());
 
-                let ptr = aligned_start as *mut HeapRegion;
-                ptr.write(HeapRegion {
-                    payload: Some(HeapRegionPayload {
-                        alloc_region: PayloadRegionAlloc::from_region(region),
-                        can_free: true,
-                        free_list: FreeList::new(
-                            aligned_start + size_of::<HeapRegion>() as u64,
-                            limit,
-                        ),
-                    }),
-                    next: self.head.next.take(),
-                });
+            let ptr = aligned_start as *mut HeapRegion;
+            ptr.write(HeapRegion {
+                payload: Some(HeapRegionPayload {
+                    alloc_region: PayloadRegionAlloc::from_region(region),
+                    can_free: true,
+                    free_list: FreeList::new(aligned_start + size_of::<HeapRegion>(), limit),
+                }),
+                next: self.head.next.take(),
+            });
 
-                self.head.next = Some(&mut *ptr);
+            self.head.next = Some(&mut *ptr);
 
-                self.head
-                    .next
-                    .as_mut()
-                    .unwrap()
-                    .allocate(layout)
-                    .expect("Couldn't make allocation from new region")
-            })
+            self.head
+                .next
+                .as_mut()
+                .unwrap()
+                .allocate(layout)
+                .expect("Couldn't make allocation from new region")
+        })
     }
 }
 
@@ -493,7 +492,7 @@ impl PayloadRegionAlloc {
             }
 
             Self::Region(region) => {
-                addr >= region.start() as usize && size < (region.limit() - addr as u64) as usize
+                addr >= region.start() && addr <= region.limit() && size < (region.limit() - addr)
             }
         }
     }
@@ -617,8 +616,8 @@ impl SimpleAllocator {
                         alloc_region: PayloadRegionAlloc::from_slice(&mut INITIAL_HEAP_REGION.0),
                         can_free: false,
                         free_list: FreeList::new(
-                            (aligned_start + size_of::<HeapRegion>()) as u64,
-                            region_end as u64,
+                            aligned_start + size_of::<HeapRegion>(),
+                            region_end,
                         ),
                     }),
                     next: None,

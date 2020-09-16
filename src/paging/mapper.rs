@@ -158,30 +158,49 @@ impl Mapper {
         Ok(MapperFlush::new(page))
     }
 
-    pub fn unmap_and_free(&mut self, page: u64) -> Result<MapperFlush> {
+    pub fn unmap_and_free(&mut self, page: usize) -> Result<MapperFlush> {
+        self.unmap_and_free_and_replace(page, RawNotPresentPte::unused())
+    }
+
+    pub fn unmap_and_free_and_replace(
+        &mut self,
+        page: usize,
+        new_pte: impl Into<RawNotPresentPte>,
+    ) -> Result<MapperFlush> {
         // We can improve this - particularly we can avoid all of the flushing
         // and not create page tables. Also, we should be able to delete page tables if they're no longer needed
-        let mut pte = self.create_pte_mut_for_address(page)?;
+        let mut pte = self.create_pte_mut_for_address(page as u64)?;
 
         if pte.is_present() {
             physmem::deallocate_frame(pte.present().unwrap().frame());
         }
 
-        *pte = RawPte::unused();
-        Ok(MapperFlush::new(page))
+        *pte = new_pte.into().into();
+        Ok(MapperFlush::new(page as u64))
+    }
+
+    pub fn set_present(
+        &mut self,
+        page: u64,
+        new_pte: impl Into<RawPresentPte>,
+    ) -> Result<MapperFlush> {
+        self.do_set_pte(page, new_pte.into())
     }
 
     pub fn set_not_present(
         &mut self,
         page: u64,
-        npp: impl Into<RawNotPresentPte>,
+        new_pte: impl Into<RawNotPresentPte>,
     ) -> Result<MapperFlush> {
+        self.do_set_pte(page, new_pte.into())
+    }
+
+    fn do_set_pte(&mut self, page: u64, new_pte: impl Into<RawPte>) -> Result<MapperFlush> {
         let mut pte = self.create_pte_mut_for_address(page)?;
 
-        // We should only be doing this for unused pages
-        assert_eq!(*pte, RawPte::unused());
-        assert!(pte.is_unused());
-        *pte = npp.into().into();
+        // We should only be doing this for not present pages
+        assert!(!pte.is_present());
+        *pte = new_pte.into();
         Ok(MapperFlush::new(page))
     }
 }

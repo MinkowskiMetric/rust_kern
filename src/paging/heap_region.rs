@@ -1,15 +1,14 @@
-use super::Result;
-use bitflags::bitflags;
-/*use super::page_entry::{self, PresentPageFlags, RawPresentPte};
-use super::{
-    lock_page_table, p1_index, p2_index, p3_index, p4_index, ActivePageTable,
-    MappedMutPteReference, MemoryError, PageTable, Result, L1, L2, PAGE_SIZE,
+use super::page_entry::{
+    InvalidPteError, NotPresentPageType, PresentPageFlags, RawNotPresentPte, RawPresentPte,
 };
-use crate::physmem::{allocate_frame, Frame};
-use alloc::vec::Vec;
-use core::mem::MaybeUninit;
-use core::ops::{Deref, DerefMut};
-use spin::Mutex;
+use super::{
+    lock_page_table, p2_index, p3_index, p4_index, ActivePageTable, Frame, MapperFlushAll,
+    MemoryError, Result, PAGE_SIZE,
+};
+use crate::init_mutex::InitMutex;
+use crate::physmem;
+use core::convert::{TryFrom, TryInto};
+use core::fmt;
 
 fn align_down(addr: usize, align: usize) -> usize {
     if align.is_power_of_two() {
@@ -21,408 +20,692 @@ fn align_down(addr: usize, align: usize) -> usize {
     }
 }
 
-/// Align upwards. Returns the smallest x with alignment `align`
-/// so that x >= addr. The alignment must be a power of 2.
 fn align_up(addr: usize, align: usize) -> usize {
     align_down(addr + align - 1, align)
-}*/
+}
 
-bitflags! {
-    pub struct RegionFlags: u64 {
-        const PAGED = 1 << 0;
+const REGION_CHUNK_PAGES: usize = 16;
+const REGION_CHUNK_SIZE_IN_BYTES: usize = REGION_CHUNK_PAGES * (PAGE_SIZE as usize);
+const MAXIMUM_REGION_SIZE_IN_CHUNKS: usize = RawPresentPte::MAX_COUNTER_VALUE as usize;
+
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RegionHeaderBasePte(u16);
+
+impl RegionHeaderBasePte {
+    pub fn new(region_size_in_chunks: usize) -> Self {
+        let safe_counter = if region_size_in_chunks > 0
+            && region_size_in_chunks <= MAXIMUM_REGION_SIZE_IN_CHUNKS
+        {
+            (region_size_in_chunks - 1) as u16
+        } else {
+            panic!("Invalid region size {}", region_size_in_chunks)
+        };
+
+        Self(safe_counter)
+    }
+
+    pub fn from_counter(counter: u16) -> Self {
+        assert!(counter < RawPresentPte::MAX_COUNTER_VALUE);
+        Self(counter)
+    }
+
+    pub fn size_in_chunks(&self) -> usize {
+        (self.0 + 1).into()
+    }
+
+    pub fn counter(&self) -> u16 {
+        self.0
     }
 }
 
-/*struct RegionManager {
-    base: u64,
-    limit: u64,
-}*/
-
-// There are 14 free bits in an allocated page entry. We need to use some of those for flags.
-// So, how big can a region be. Lets say we save two bits for flags. That leaves us 12 bits.
-// If we quantize the size of the regions at 64KB, then that gives us a maximum region size of 256MB
-// which ought to be big enough for anyone. It isn't enough to cover the whole heap region though,
-// so the search needs to take that into account
-
-/*const REGION_ALIGNMENT_PAGES: usize = 16;
-const REGION_CHUNK_SIZE: usize = REGION_ALIGNMENT_PAGES * PAGE_SIZE as usize;
-const MAX_REGION_CHUNKS: usize = RawPresentPte::MAX_COUNTER_VALUE as usize;
-const MAXIMUM_REGION_SIZE: usize = MAX_REGION_CHUNKS * REGION_CHUNK_SIZE;*/
-
-/*struct RegionHeader {
-    pte_1: MappedMutPteReference<L1>,
-    pte_2: MappedMutPteReference<L1>,
+impl fmt::Debug for RegionHeaderBasePte {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "RegionHeaderBasePte({})",
+            self.size_in_chunks()
+        ))
+    }
 }
 
-impl RegionHeader {
-    fn create(page_table: &mut ActivePageTable, start_addr: u64) -> Result<Self> {
-        Ok(Self {
-            pte_1: page_table.create_pte_mut_for_address(start_addr)?,
-            pte_2: page_table.create_pte_mut_for_address(start_addr + PAGE_SIZE)?,
+pub struct PresentRegionHeaderPte(Frame, PresentPageFlags, RegionHeaderBasePte);
+
+impl PresentRegionHeaderPte {
+    pub fn new(frame: Frame, flags: PresentPageFlags, region_size_in_chunks: usize) -> Self {
+        Self(
+            frame,
+            flags | PresentPageFlags::REGION_HEADER,
+            RegionHeaderBasePte::new(region_size_in_chunks),
+        )
+    }
+
+    pub fn frame(&self) -> Frame {
+        self.0
+    }
+
+    pub fn flags(&self) -> PresentPageFlags {
+        self.1
+    }
+
+    pub fn size_in_chunks(&self) -> usize {
+        self.2.size_in_chunks()
+    }
+
+    fn counter(&self) -> u16 {
+        self.2.counter()
+    }
+}
+
+impl fmt::Debug for PresentRegionHeaderPte {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "PresentRegionHeaderFirstPte({:?}, {:?}, {})",
+            self.frame(),
+            self.flags(),
+            self.size_in_chunks()
+        ))
+    }
+}
+
+impl From<PresentRegionHeaderPte> for RawPresentPte {
+    fn from(region_header: PresentRegionHeaderPte) -> Self {
+        RawPresentPte::from_frame_flags_and_counter(
+            region_header.frame(),
+            region_header.flags(),
+            region_header.counter(),
+        )
+    }
+}
+
+impl TryFrom<RawPresentPte> for PresentRegionHeaderPte {
+    type Error = InvalidPteError;
+    fn try_from(rpte: RawPresentPte) -> core::result::Result<Self, Self::Error> {
+        if rpte.flags().contains(PresentPageFlags::REGION_HEADER) {
+            Ok(Self(
+                rpte.frame(),
+                rpte.flags(),
+                RegionHeaderBasePte::from_counter(rpte.counter()),
+            ))
+        } else {
+            Err(InvalidPteError(rpte.into()))
+        }
+    }
+}
+
+pub struct NotPresentRegionHeaderPte(RegionHeaderBasePte);
+
+impl NotPresentRegionHeaderPte {
+    pub fn new(region_size_in_chunks: usize) -> Self {
+        Self(RegionHeaderBasePte::new(region_size_in_chunks))
+    }
+
+    pub fn size_in_chunks(&self) -> usize {
+        self.0.size_in_chunks()
+    }
+
+    fn counter(&self) -> u16 {
+        self.0.counter()
+    }
+}
+
+impl fmt::Debug for NotPresentRegionHeaderPte {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "NotPresentRegionHeaderPte({})",
+            self.size_in_chunks()
+        ))
+    }
+}
+
+impl From<NotPresentRegionHeaderPte> for RawNotPresentPte {
+    fn from(region_header: NotPresentRegionHeaderPte) -> Self {
+        RawNotPresentPte::from_type_and_counter(
+            NotPresentPageType::RegionHeader,
+            region_header.counter(),
+        )
+    }
+}
+
+impl TryFrom<RawNotPresentPte> for NotPresentRegionHeaderPte {
+    type Error = InvalidPteError;
+    fn try_from(rpte: RawNotPresentPte) -> core::result::Result<Self, Self::Error> {
+        if rpte.page_type() == NotPresentPageType::RegionHeader {
+            Ok(Self(RegionHeaderBasePte::from_counter(rpte.counter())))
+        } else {
+            Err(InvalidPteError(rpte.into()))
+        }
+    }
+}
+
+struct RegionManager {
+    base_va: usize,
+    limit_va: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RegionInfo {
+    start_va: usize,
+    limit_va: usize,
+}
+
+impl RegionInfo {
+    pub fn size(&self) -> usize {
+        self.limit_va - self.start_va
+    }
+}
+
+static REGION_MANAGER: InitMutex<RegionManager> = InitMutex::new();
+
+impl RegionManager {
+    pub unsafe fn new(base_va: usize, limit_va: usize) -> Result<Self> {
+        lock_page_table().and_then(|mut page_table| {
+            // Write out empty region headers through the whole space
+            Self::write_empty_regions(&mut page_table, base_va, limit_va, None)?;
+
+            Ok(Self { base_va, limit_va })
         })
     }
 
-    fn is_free_region(&self) -> bool {
-        !self.pte_1.is_present()
-    }
-
-    fn this_region_size_in_chunks(&self) -> usize {
-        get_chunks_from_pte(*self.pte_1)
-    }
-
-    fn prev_region_size_in_chunks(&self) -> usize {
-        get_chunks_from_pte(*self.pte_2)
-    }
-
-    fn set_this_region_size_in_chunks(&mut self, size: usize, flags: RegionFlags) {
-        *self.pte_1 = make_region_header_page_entry(
-            (*self.pte_1).frame().physical_address(),
-            (*self.pte_1).flags(),
-            size as u64,
-            flags,
-        )
-    }
-
-    fn set_prev_region_size_in_chunks(&mut self, size: usize, flags: RegionFlags) {
-        *self.pte_2 = make_region_header_page_entry(
-            (*self.pte_1).frame().physical_address(),
-            (*self.pte_1).flags(),
-            size as u64,
-            flags,
-        )
-    }
-}*/
-
-/*impl RegionManager {
-    pub fn new(base: u64, limit: u64) -> Result<Self> {
-        // Base needs to be an even page index to ensure that the first and second pages
-        // as in the same L1 table
-        let base = align_up(base as usize, PAGE_SIZE as usize * 2) as u64;
-        let limit = align_down(limit as usize, PAGE_SIZE as usize) as u64;
-        assert!(limit > base);
-
-        let size_in_region_chunks = (limit - base) / REGION_CHUNK_SIZE as u64;
-        assert!(size_in_region_chunks > 0);
-
-        // We use 2 page table entries to record data about the chunk. We write the chunk size in page 0
-        // the previous chunk size in page 1
-        assert!(REGION_ALIGNMENT_PAGES >= 2);
-
-        /*let mut page_table = unsafe { lock_page_table() }?;
-
-        // Create free chunks starting at the base address
-        Self::create_free_region_chain(&mut page_table, base, size_in_region_chunks)?;*/
-
-        Ok(RegionManager { base, limit })
-    }
-
-    pub fn allocate_region(&mut self, required_pages: usize, flags: RegionFlags) -> Result<Region> {
-        /*let required_chunks =
-            align_up(required_pages as usize, REGION_ALIGNMENT_PAGES) / REGION_ALIGNMENT_PAGES;
+    pub fn allocate_region(&mut self, pages: usize) -> Result<Region> {
+        let pages = align_up(pages, REGION_CHUNK_PAGES);
+        let required_size = pages * (PAGE_SIZE as usize);
 
         unsafe { lock_page_table() }.and_then(|mut page_table| {
-            let mut this_region_start = self.base;
-            while this_region_start < self.limit {
-                let mut pte = page_table
-                    .get_pte_for_address(this_region_start)
-                    .expect("Failed to map region page table");
-                let this_region_chunks = get_chunks_from_pte(*pte);
+            let mut pos = self.base_va;
+            while pos < self.limit_va {
+                if let Some(mut region_info) =
+                    Self::find_empty_region(&mut page_table, pos, self.limit_va)?
+                {
+                    if region_info.size() >= required_size {
+                        if region_info.size() > required_size {
+                            let next_allocated_chunk = Self::find_allocated_region(
+                                &mut page_table,
+                                region_info.limit_va,
+                                self.limit_va,
+                            )?;
+                            let start_of_free_regions = region_info.start_va + required_size;
+                            let end_of_free_regions = match &next_allocated_chunk {
+                                Some(region_info) => region_info.start_va,
+                                _ => self.limit_va,
+                            };
 
-                if !pte.is_present() && this_region_chunks >= required_chunks {
-                    if this_region_chunks > required_chunks {
-                        self.split_region(
-                            &mut page_table,
-                            this_region_start,
-                            this_region_chunks,
-                            required_chunks,
-                        )?;
+                            // Clear the region out. This is a mutating change so we can't fail after this
+                            let last_empty_chunk_size = Self::write_empty_regions(
+                                &mut page_table,
+                                start_of_free_regions,
+                                end_of_free_regions,
+                                Some(pages / REGION_CHUNK_PAGES),
+                            )?
+                            .unwrap();
+
+                            // Change the size of the current region
+                            Self::update_this_chunk_size(
+                                &mut page_table,
+                                region_info.start_va,
+                                pages / REGION_CHUNK_PAGES,
+                            )
+                            .expect("Cannot fail after modifying regions");
+
+                            // Fix up the back pointer in the region
+                            if let Some(next_allocated_chunk) = next_allocated_chunk {
+                                Self::update_previous_chunk_size(
+                                    &mut page_table,
+                                    next_allocated_chunk.start_va,
+                                    last_empty_chunk_size,
+                                )
+                                .expect("Cannot fail after modifying regions");
+                            }
+
+                            region_info = RegionInfo {
+                                start_va: region_info.start_va,
+                                limit_va: region_info.start_va + required_size,
+                            };
+                        }
+
+                        return self
+                            .map_region(&mut page_table, &region_info)
+                            .map(|_| Region { region_info });
+                    } else {
+                        pos += region_info.size();
                     }
-
-                    return self
-                        .map_region(&mut page_table, this_region_start, required_chunks)
-                        .map(|_| Region {
-                            start_va: this_region_start,
-                            limit_va: this_region_start
-                                + ((required_chunks * REGION_CHUNK_SIZE) as u64),
-                        });
+                } else {
+                    // No empty regions
+                    break;
                 }
-
-                assert!(this_region_chunks != 0);
-                this_region_start += (this_region_chunks * REGION_CHUNK_SIZE) as u64;
             }
 
             Err(MemoryError::NoRegionAddressSpaceAvailable)
-        })*/
-        todo!()
+        })
     }
 
-    pub fn release_region(&mut self, start_va: u64, limit_va: u64) {
-        /*assert_eq!(
-            start_va & !(REGION_CHUNK_SIZE as u64 - 1),
-            start_va,
-            "Invalid start address"
-        );
-        assert!(start_va >= self.base, "Invalid start address");
-        assert_eq!(
-            limit_va & !(REGION_CHUNK_SIZE as u64 - 1),
-            limit_va,
-            "Invalid limit address"
-        );
-        assert!(
-            limit_va >= start_va && limit_va <= self.limit,
-            "Invalid limit address"
-        );
+    pub fn deallocate_region(&mut self, region_info: RegionInfo) -> Result<()> {
+        unsafe { lock_page_table() }.and_then(|mut page_table| {
+            let header_pte = page_table
+                .get_pte_for_address(region_info.start_va as u64)
+                .and_then(|pte| pte.present().or(Err(MemoryError::InvalidRegion)))
+                .and_then(|pp| {
+                    PresentRegionHeaderPte::try_from(pp).or(Err(MemoryError::InvalidRegion))
+                })?;
 
-        let size_in_chunks = (limit_va - start_va) / REGION_CHUNK_SIZE as u64;
-        unsafe { lock_page_table() }
-            .and_then(|mut page_table| {
-                let prev_region_size = {
-                    let mut region_header = RegionHeader::create(&mut page_table, start_va)?;
-                    assert_eq!(
-                        region_header.this_region_size_in_chunks() as u64,
-                        size_in_chunks,
-                        "Invalid region size"
-                    );
-                    assert!(!region_header.is_free_region(), "Double freeing region");
+            if region_info.start_va + (REGION_CHUNK_SIZE_IN_BYTES * header_pte.size_in_chunks())
+                != region_info.limit_va
+            {
+                return Err(MemoryError::InvalidRegion);
+            }
 
-                    // We ignore the previous region size for the first region because the special
-                    // encoding will catch us out
-                    if start_va > self.base {
-                        region_header.prev_region_size_in_chunks()
-                    } else {
-                        0
-                    }
-                };
-                assert!(
-                    (start_va - self.base) >= (prev_region_size * REGION_CHUNK_SIZE) as u64,
-                    "Invalid prev region size"
-                );
+            let (empty_space_start, prev_region_size) = if region_info.start_va > self.base_va {
+                let this_prev_header_pte = page_table
+                    .get_pte_for_address(region_info.start_va as u64 + PAGE_SIZE)
+                    .and_then(|pte| pte.present().or(Err(MemoryError::InvalidRegion)))
+                    .and_then(|pp| {
+                        PresentRegionHeaderPte::try_from(pp).or(Err(MemoryError::InvalidRegion))
+                    })?;
 
-                // Unmap any pages in the region
-                self.unmap_region(&mut page_table, start_va, size_in_chunks as usize);
+                let prev_region_start = region_info.start_va
+                    - (REGION_CHUNK_SIZE_IN_BYTES * this_prev_header_pte.size_in_chunks());
 
-                // We need to count forward how many free chunks there are after this one
-                let mut free_chunks = size_in_chunks;
-                let mut free_chunks_end = limit_va;
-                let mut last_chunk_size = size_in_chunks;
-                while free_chunks_end < self.limit {
-                    let mut following_region_header =
-                        RegionHeader::create(&mut page_table, free_chunks_end)?;
-                    assert_eq!(
-                        following_region_header.prev_region_size_in_chunks() as u64,
-                        last_chunk_size,
-                        "Invalid prev region size"
-                    );
+                let prev_prev_header_raw_pte =
+                    *page_table.get_pte_for_address(prev_region_start as u64 + PAGE_SIZE)?;
 
-                    if !following_region_header.is_free_region() {
-                        break;
-                    }
+                if prev_prev_header_raw_pte.is_present() {
+                    // The previous region is full, so ignore it
+                    (
+                        region_info.start_va,
+                        Some(this_prev_header_pte.size_in_chunks()),
+                    )
+                } else if prev_region_start == self.base_va {
+                    (prev_region_start, None)
+                } else {
+                    let prev_prev_header_pte = prev_prev_header_raw_pte
+                        .not_present()
+                        .or(Err(MemoryError::InvalidRegion))
+                        .and_then(|pp| {
+                            NotPresentRegionHeaderPte::try_from(pp)
+                                .or(Err(MemoryError::InvalidRegion))
+                        })?;
 
-                    // We're going to include this region into the free region block we're creating
-                    last_chunk_size = following_region_header.this_region_size_in_chunks() as u64;
-                    free_chunks += last_chunk_size;
-                    free_chunks_end += (last_chunk_size * REGION_CHUNK_SIZE as u64);
-                    assert!(free_chunks_end <= self.limit, "Invalid region size");
+                    (
+                        prev_region_start,
+                        Some(prev_prev_header_pte.size_in_chunks()),
+                    )
                 }
-
-                let free_chunks_start = start_va
-                    - if prev_region_size > 0 {
-                        let mut prev_region_header = RegionHeader::create(
-                            &mut page_table,
-                            start_va - (prev_region_size * REGION_CHUNK_SIZE) as u64,
-                        )?;
-                        assert_eq!(
-                            prev_region_header.this_region_size_in_chunks(),
-                            prev_region_size,
-                            "Invalid prev region size"
-                        );
-
-                        // If the previous region is free then merge the two
-                        if prev_region_header.is_free_region() {
-                            free_chunks += prev_region_size as u64;
-                            (prev_region_size * REGION_CHUNK_SIZE) as u64
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    };
-
-                Self::create_free_region_chain(&mut page_table, free_chunks_start, free_chunks)
-            })
-            .expect("what if this fails!?");*/
-        todo!()
-    }
-
-    fn split_region(
-        &mut self,
-        page_table: &mut ActivePageTable,
-        this_region_start: u64,
-        original_chunks: usize,
-        new_chunks: usize,
-    ) -> Result<()> {
-        /*let new_region_start = this_region_start + (new_chunks * REGION_CHUNK_SIZE) as u64;
-        let next_region_start = this_region_start + (original_chunks * REGION_CHUNK_SIZE) as u64;
-
-        // Do all the operations that can fail up front
-        let mut this_region_header = RegionHeader::create(page_table, this_region_start)?;
-        let mut new_region_header = RegionHeader::create(page_table, new_region_start)?;
-        let mut next_region_header = if next_region_start < self.limit {
-            Some(RegionHeader::create(page_table, next_region_start)?)
-        } else {
-            None
-        };
-
-        // At this point we cannot fail
-        this_region_header.set_this_region_size_in_chunks(new_chunks, RegionFlags::empty());
-
-        new_region_header
-            .set_this_region_size_in_chunks(original_chunks - new_chunks, RegionFlags::empty());
-        new_region_header.set_prev_region_size_in_chunks(new_chunks, RegionFlags::empty());
-
-        if let Some(mut next_region) = next_region_header {
-            next_region
-                .set_prev_region_size_in_chunks(original_chunks - new_chunks, RegionFlags::empty());
-        }
-
-        Ok(())*/
-        todo!()
-    }
-
-    fn create_free_region_chain(
-        page_table: &mut ActivePageTable,
-        start: u64,
-        chunks: u64,
-    ) -> Result<()> {
-        /*let mut free_region_start = start;
-        let mut remaining_region_chunks = chunks;
-        let mut last_region_chunks = 0;
-        while remaining_region_chunks > 0 {
-            let this_region_chunks = remaining_region_chunks.min(MAX_REGION_CHUNKS as u64);
-
-            let mut region_header = RegionHeader::create(page_table, free_region_start)?;
-            region_header
-                .set_this_region_size_in_chunks(this_region_chunks as usize, RegionFlags::empty());
-            region_header
-                .set_prev_region_size_in_chunks(last_region_chunks as usize, RegionFlags::empty());
-
-            last_region_chunks = this_region_chunks;
-            remaining_region_chunks -= this_region_chunks;
-            free_region_start += (this_region_chunks * REGION_CHUNK_SIZE as u64);
-        }
-
-        Ok(())*/
-        todo!()
-    }
-
-    fn map_region(
-        &mut self,
-        page_table: &mut ActivePageTable,
-        region_start: u64,
-        region_chunks: usize,
-    ) -> Result<()> {
-        /*for chunk_index in 0..region_chunks {
-            let map_chunk_result: Result<()> = try {
-                let chunk_start = region_start + (chunk_index * REGION_CHUNK_SIZE) as u64;
-
-                for page_idx in 0..REGION_ALIGNMENT_PAGES {
-                    let page_start = chunk_start + (page_idx as u64 * PAGE_SIZE);
-
-                    let mut pte = page_table.create_pte_mut_for_address(page_start)?;
-
-                    // The PTE should not be marked as present or writeable
-                    let original_flags = pte.flags();
-                    assert!(!original_flags.intersects(PageFlags::PRESENT | PageFlags::WRITABLE));
-
-                    // Allocate a physical page and assign it to the page.
-                    let frame = crate::physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
-                    *pte = PageTableEntry::from_frame_and_flags(
-                        frame,
-                        original_flags
-                            | PageFlags::PRESENT
-                            | PageFlags::WRITABLE
-                            | PageFlags::NO_EXECUTE,
-                    );
-                }
+            } else {
+                // There are no chunks before us to look at
+                (region_info.start_va, None)
             };
 
-            if let Err(e) = map_chunk_result {
-                // Technically, it is possible that not all of this region is mapped. We might
-                // have finished part way through mapping the last chunk, but unmap_region can
-                // tolerate that.
-                self.unmap_region(page_table, region_start, chunk_index + 1);
-                return Err(e);
-            }
-        }
+            let empty_space_end =
+                Self::find_allocated_region(&mut page_table, region_info.limit_va, self.limit_va)?
+                    .map(|r| r.start_va)
+                    .unwrap_or(self.limit_va);
 
-        Ok(())*/
-        todo!()
+            // Unmap the region
+            self.unmap_region(&mut page_table, &region_info)?;
+
+            // Then write out a full set of clear entries
+            let last_empty_chunk_size = Self::write_empty_regions(
+                &mut page_table,
+                empty_space_start,
+                empty_space_end,
+                prev_region_size,
+            )?
+            .unwrap();
+
+            if empty_space_end < self.limit_va {
+                // Fix up the previous region pointer in the next region
+                Self::update_previous_chunk_size(
+                    &mut page_table,
+                    empty_space_end,
+                    last_empty_chunk_size,
+                )
+                .expect("Cannot fail after modifying regions");
+            }
+
+            Ok(())
+        })
     }
 
-    fn unmap_region(
-        &mut self,
-        page_table: &mut ActivePageTable,
-        region_start: u64,
-        region_chunks: usize,
-    ) {
-        /*let res: Result<()> = try {
-            for page_idx in 0..(region_chunks * REGION_ALIGNMENT_PAGES) {
-                let page_start = region_start + (page_idx as u64 * PAGE_SIZE);
-                let mut pte = page_table.create_pte_mut_for_address(page_start)?;
+    fn map_region(&self, page_table: &mut ActivePageTable, region: &RegionInfo) -> Result<()> {
+        let mut flusher = MapperFlushAll::new();
+        let mut pos = region.start_va;
 
-                let original_flags = pte.flags();
-                assert!(original_flags.contains(PageFlags::PRESENT));
+        let result: Result<()> = try {
+            let original_header_pte: NotPresentRegionHeaderPte = page_table
+                .get_pte_for_address(pos as u64)?
+                .not_present()
+                .expect("Region already mapped")
+                .try_into()
+                .expect("Invalid region header entry");
 
-                let frame = pte.frame();
+            let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+            flusher.consume(page_table.set_present(
+                pos as u64,
+                PresentRegionHeaderPte::new(
+                    frame,
+                    PresentPageFlags::WRITABLE
+                        | PresentPageFlags::GLOBAL
+                        | PresentPageFlags::NO_EXECUTE,
+                    original_header_pte.size_in_chunks(),
+                ),
+            )?);
 
-                // Clear the present, writeable and no execute flags
-                let new_flags = original_flags
-                    & !(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE);
+            pos += PAGE_SIZE as usize;
 
-                *pte =
-                    PageTableEntry::from_frame_and_flags(Frame::containing_address(0), new_flags);
-                unsafe {
-                    x86::tlb::flush(page_start as usize);
-                }
+            if region.start_va > self.base_va {
+                let original_header_pte: NotPresentRegionHeaderPte = page_table
+                    .get_pte_for_address(pos as u64)?
+                    .not_present()
+                    .expect("Region already mapped")
+                    .try_into()
+                    .expect("Invalid region header entry");
 
-                crate::physmem::deallocate_frame(frame);
+                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+                flusher.consume(page_table.set_present(
+                    pos as u64,
+                    PresentRegionHeaderPte::new(
+                        frame,
+                        PresentPageFlags::WRITABLE
+                            | PresentPageFlags::GLOBAL
+                            | PresentPageFlags::NO_EXECUTE,
+                        original_header_pte.size_in_chunks(),
+                    ),
+                )?);
+
+                pos += PAGE_SIZE as usize;
+            }
+
+            while pos < region.limit_va {
+                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+
+                flusher.consume(page_table.map_to(
+                    pos as u64,
+                    frame,
+                    PresentPageFlags::WRITABLE
+                        | PresentPageFlags::GLOBAL
+                        | PresentPageFlags::NO_EXECUTE,
+                )?);
+                pos += PAGE_SIZE as usize;
             }
         };
 
-        res.expect("What do we do with an error here?")*/
-        todo!()
+        flusher.flush(page_table);
+
+        if let Err(error) = result {
+            self.unmap_region(page_table, region)
+                .expect("Failed to unmap region");
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn unmap_region(&self, page_table: &mut ActivePageTable, region: &RegionInfo) -> Result<()> {
+        let mut flusher = MapperFlushAll::new();
+        let mut pos = region.start_va;
+
+        let original_header_pte: PresentRegionHeaderPte = page_table
+            .get_pte_for_address(pos as u64)?
+            .present()
+            .expect("Region not mapped")
+            .try_into()
+            .expect("Invalid region header entry");
+
+        flusher.consume(page_table.unmap_and_free_and_replace(
+            pos,
+            NotPresentRegionHeaderPte::new(original_header_pte.size_in_chunks()),
+        )?);
+
+        pos += PAGE_SIZE as usize;
+
+        if region.start_va > self.base_va {
+            let original_header_pte: PresentRegionHeaderPte = page_table
+                .get_pte_for_address(pos as u64)?
+                .present()
+                .expect("Region not mapped")
+                .try_into()
+                .expect("Invalid region header entry");
+
+            flusher.consume(page_table.unmap_and_free_and_replace(
+                pos,
+                NotPresentRegionHeaderPte::new(original_header_pte.size_in_chunks()),
+            )?);
+
+            pos += PAGE_SIZE as usize;
+        }
+
+        while pos < region.limit_va {
+            flusher.consume(page_table.unmap_and_free(pos)?);
+            pos += PAGE_SIZE as usize;
+        }
+
+        flusher.flush(page_table);
+
+        Ok(())
+    }
+
+    fn find_empty_region(
+        page_table: &mut ActivePageTable,
+        start_va: usize,
+        limit_va: usize,
+    ) -> Result<Option<RegionInfo>> {
+        let mut pos = start_va;
+        while pos < limit_va {
+            let header_pte = page_table.get_pte_for_address(pos as u64)?;
+
+            if header_pte.is_present() {
+                let header_pte = PresentRegionHeaderPte::try_from(header_pte.present().unwrap())
+                    .expect("invalid page table entry in region header");
+                let region_size_in_chunks = header_pte.size_in_chunks();
+
+                pos += region_size_in_chunks * REGION_CHUNK_SIZE_IN_BYTES;
+            } else {
+                let header_pte =
+                    NotPresentRegionHeaderPte::try_from(header_pte.not_present().unwrap())
+                        .expect("invalid page table entry in region header");
+                let region_size_in_chunks = header_pte.size_in_chunks();
+
+                return Ok(Some(RegionInfo {
+                    start_va: pos,
+                    limit_va: pos + (region_size_in_chunks * REGION_CHUNK_SIZE_IN_BYTES),
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn find_allocated_region(
+        page_table: &mut ActivePageTable,
+        start_va: usize,
+        limit_va: usize,
+    ) -> Result<Option<RegionInfo>> {
+        let mut pos = start_va;
+        while pos < limit_va {
+            let header_pte = page_table.get_pte_for_address(pos as u64)?;
+
+            if header_pte.is_present() {
+                let header_pte = PresentRegionHeaderPte::try_from(header_pte.present().unwrap())
+                    .expect("invalid page table entry in region header");
+                let region_size_in_chunks = header_pte.size_in_chunks();
+
+                return Ok(Some(RegionInfo {
+                    start_va: pos,
+                    limit_va: pos + (region_size_in_chunks * REGION_CHUNK_SIZE_IN_BYTES),
+                }));
+            } else {
+                let header_pte =
+                    NotPresentRegionHeaderPte::try_from(header_pte.not_present().unwrap())
+                        .expect("invalid page table entry in region header");
+                let region_size_in_chunks = header_pte.size_in_chunks();
+
+                pos += region_size_in_chunks * REGION_CHUNK_SIZE_IN_BYTES;
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn write_empty_regions(
+        page_table: &mut ActivePageTable,
+        start_va: usize,
+        limit_va: usize,
+        mut prev_chunk_size: Option<usize>,
+    ) -> Result<Option<usize>> {
+        // The P4 requirement is important
+        assert_eq!(
+            p4_index(start_va as u64),
+            p4_index((limit_va - 1) as u64),
+            "Heap region space cannot span multiple P4 entries"
+        );
+        assert_eq!(
+            p3_index(start_va as u64),
+            p3_index((limit_va - 1) as u64),
+            "Heap region space cannot span multiple P3 entries"
+        );
+        assert!(
+            limit_va >= start_va,
+            "Limit address is before start address"
+        );
+        assert_eq!(
+            align_up(start_va, REGION_CHUNK_SIZE_IN_BYTES),
+            start_va,
+            "Start address is not region size aligned"
+        );
+        assert_eq!(
+            align_down(limit_va, REGION_CHUNK_SIZE_IN_BYTES),
+            limit_va,
+            "Limit address is not region size aligned"
+        );
+
+        let p2 = page_table
+            .p4_mut()
+            .create_next_table(p4_index(start_va as u64))?
+            .create_next_table(p3_index(start_va as u64))?;
+
+        let mut flusher = MapperFlushAll::new();
+        let mut pos = start_va;
+
+        while pos < limit_va {
+            let empty_region_size_in_chunks =
+                ((limit_va - pos) / REGION_CHUNK_SIZE_IN_BYTES).min(MAXIMUM_REGION_SIZE_IN_CHUNKS);
+            let empty_region_size_in_bytes =
+                empty_region_size_in_chunks * REGION_CHUNK_SIZE_IN_BYTES;
+            let chunk_end = pos + empty_region_size_in_bytes;
+
+            let mut current_p2_index = p2_index(pos as u64);
+
+            // Write out the header
+            flusher.consume(page_table.set_not_present(
+                pos as u64,
+                NotPresentRegionHeaderPte::new(empty_region_size_in_chunks),
+            )?);
+            pos += PAGE_SIZE as usize;
+
+            if let Some(prev_chunk_size) = prev_chunk_size {
+                flusher.consume(page_table.set_not_present(
+                    pos as u64,
+                    NotPresentRegionHeaderPte::new(prev_chunk_size),
+                )?);
+                pos += PAGE_SIZE as usize;
+            }
+
+            // Set the prev chunk size
+            prev_chunk_size = Some(empty_region_size_in_chunks);
+
+            loop {
+                // Loop through the current p1 table to make sure we set everything to unused
+                while pos < chunk_end && p2_index(pos as u64) == current_p2_index {
+                    flusher.consume(
+                        page_table.set_not_present(pos as u64, RawNotPresentPte::unused())?,
+                    );
+                    pos += PAGE_SIZE as usize;
+                }
+
+                if pos == chunk_end {
+                    // All done
+                    break;
+                }
+
+                // We're moving to a new p1 table. We can skip it if it doesn't exist
+                if p2.next_table_frame(p2_index(pos as u64)).is_ok() {
+                    // The p1 table does exist, so we're going to need to clear it
+                    current_p2_index = p2_index(pos as u64);
+                } else {
+                    // Move the position and go around again
+                    pos = (pos + (512 * PAGE_SIZE as usize)).min(chunk_end);
+                }
+            }
+        }
+
+        // We don't need to flush the tlb here because we haven't changed any visibility
+        unsafe {
+            flusher.ignore();
+        }
+
+        Ok(prev_chunk_size)
+    }
+
+    fn update_this_chunk_size(
+        page_table: &mut ActivePageTable,
+        start_va: usize,
+        this_size_in_chunks: usize,
+    ) -> Result<()> {
+        let header_address = start_va;
+        let mut header_pte = page_table.get_pte_mut_for_address(header_address as u64)?;
+
+        if header_pte.is_present() {
+            let original_header_pte =
+                PresentRegionHeaderPte::try_from(header_pte.present().unwrap())
+                    .expect("invalid page table entry in region header");
+            *header_pte = RawPresentPte::from(PresentRegionHeaderPte::new(
+                original_header_pte.frame(),
+                original_header_pte.flags(),
+                this_size_in_chunks,
+            ))
+            .into();
+        } else {
+            let _original_header_pte =
+                NotPresentRegionHeaderPte::try_from(header_pte.not_present().unwrap())
+                    .expect("invalid page table entry in region header");
+            *header_pte =
+                RawNotPresentPte::from(NotPresentRegionHeaderPte::new(this_size_in_chunks)).into();
+        }
+
+        Ok(())
+    }
+
+    fn update_previous_chunk_size(
+        page_table: &mut ActivePageTable,
+        start_va: usize,
+        prev_size_in_chunks: usize,
+    ) -> Result<()> {
+        let header_address = start_va + (PAGE_SIZE as usize);
+        let mut header_pte = page_table.get_pte_mut_for_address(header_address as u64)?;
+
+        if header_pte.is_present() {
+            let original_header_pte =
+                PresentRegionHeaderPte::try_from(header_pte.present().unwrap())
+                    .expect("invalid page table entry in region header");
+            *header_pte = RawPresentPte::from(PresentRegionHeaderPte::new(
+                original_header_pte.frame(),
+                original_header_pte.flags(),
+                prev_size_in_chunks,
+            ))
+            .into();
+        } else {
+            let _original_header_pte =
+                NotPresentRegionHeaderPte::try_from(header_pte.not_present().unwrap())
+                    .expect("invalid page table entry in region header");
+            *header_pte =
+                RawNotPresentPte::from(NotPresentRegionHeaderPte::new(prev_size_in_chunks)).into();
+        }
+
+        Ok(())
     }
 }
-
-static REGION_MANAGER: Mutex<Option<RegionManager>> = Mutex::new(None);
-
-#[repr(transparent)]
-struct RegionManagerLock<'a> {
-    guard: spin::MutexGuard<'a, Option<RegionManager>>,
-}
-
-impl<'a> Deref for RegionManagerLock<'a> {
-    type Target = RegionManager;
-    fn deref(&self) -> &Self::Target {
-        self.guard.as_ref().expect("Region manager not initialized")
-    }
-}
-
-impl<'a> DerefMut for RegionManagerLock<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.as_mut().expect("Region manager not initialized")
-    }
-}
-
-fn lock_region_manager<'a>() -> RegionManagerLock<'a> {
-    RegionManagerLock {
-        guard: REGION_MANAGER.lock(),
-    }
-}*/
 
 pub struct Region {
-    start_va: u64,
-    limit_va: u64,
+    region_info: RegionInfo,
 }
 
 impl Region {
@@ -431,37 +714,39 @@ impl Region {
     }
 
     pub fn as_ptr_offset<T>(&self, offset: usize) -> *const T {
-        (self.start_va + (offset as u64)) as *const T
+        (self.region_info.start_va + offset) as *const T
     }
     pub fn as_mut_ptr<T>(&mut self) -> *mut T {
         self.as_mut_ptr_offset(0)
     }
 
     pub fn as_mut_ptr_offset<T>(&mut self, offset: usize) -> *mut T {
-        (self.start_va + (offset as u64)) as *mut T
+        (self.region_info.start_va + offset) as *mut T
     }
 
-    pub fn start(&self) -> u64 {
-        self.start_va
+    pub fn start(&self) -> usize {
+        self.region_info.start_va
     }
 
-    pub fn limit(&self) -> u64 {
-        self.limit_va
+    pub fn limit(&self) -> usize {
+        self.region_info.limit_va
     }
 }
 
-/*impl Drop for Region {
+impl Drop for Region {
     fn drop(&mut self) {
-        lock_region_manager().release_region(self.start_va, self.limit_va);
+        REGION_MANAGER
+            .lock()
+            .deallocate_region(self.region_info)
+            .expect("Failed to deallocate region");
     }
-}*/
+}
 
-pub unsafe fn init(_base: u64, _limit: u64) -> Result<()> {
-    //*REGION_MANAGER.lock() = Some(RegionManager::new(base, limit)?);
+pub unsafe fn init(base: usize, limit: usize) -> Result<()> {
+    REGION_MANAGER.init(RegionManager::new(base, limit)?);
     Ok(())
 }
 
-pub fn allocate_region(_pages: usize, _flags: RegionFlags) -> Result<Region> {
-    //lock_region_manager().allocate_region(pages, flags)
-    todo!("Regions aren't implemented yet")
+pub fn allocate_region(pages: usize) -> Result<Region> {
+    REGION_MANAGER.lock().allocate_region(pages)
 }

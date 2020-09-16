@@ -12,7 +12,7 @@ pub use table::{
     L1, L2, L3, L4,
 };
 
-pub use heap_region::{allocate_region, Region, RegionFlags};
+pub use heap_region::{allocate_region, Region};
 pub use hyperspace::{map_page, HyperspaceMapping};
 pub use mapper::{MappedMutPteReference, MappedPteReference, Mapper, MapperFlush, MapperFlushAll};
 pub use stacks::{allocate_kernel_stack, KernelStack, DEFAULT_KERNEL_STACK_PAGES};
@@ -31,6 +31,7 @@ pub enum MemoryError {
     NoRegionAddressSpaceAvailable,
     OutOfMemory,
     InvalidStack,
+    InvalidRegion,
 }
 
 pub type Result<T> = core::result::Result<T, MemoryError>;
@@ -52,8 +53,8 @@ pub const KERNEL_STACKS_BASE: usize = 0xffff_ff80_4000_0000;
 pub const KERNEL_STACKS_LIMIT: usize = 0xffff_ff80_8000_0000;
 
 // Allow 1GB for heap regions
-pub const KERNEL_HEAP_BASE: u64 = 0xffff_ff80_8000_0000;
-pub const KERNEL_HEAP_LIMIT: u64 = 0xffff_ff80_c000_0000;
+pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_8000_0000;
+pub const KERNEL_HEAP_LIMIT: usize = 0xffff_ff80_c000_0000;
 
 pub struct ActivePageTable<'a> {
     #[allow(dead_code)]

@@ -139,7 +139,7 @@ impl StackManager {
                 let result = try {
                     let mut pos = start_va;
                     while pos < limit_va {
-                        flusher.consume(page_table.unmap_and_free(pos as u64)?);
+                        flusher.consume(page_table.unmap_and_free(pos)?);
                         pos += PAGE_SIZE as usize;
                     }
                 };
