@@ -115,7 +115,7 @@ impl RawPresentPte {
     ) -> Self {
         assert!(counter < Self::MAX_COUNTER_VALUE);
         Self(
-            frame.physical_address()
+            frame.physical_address() as u64
                 | flags.bits()
                 | RawPageFlags::PRESENT.bits()
                 | ((counter as u64) << Self::COUNTER_SHIFT),
@@ -129,7 +129,7 @@ impl RawPresentPte {
 
     #[inline]
     pub fn frame(&self) -> Frame {
-        Frame::containing_address(self.0 & 0x000fffff_fffff000)
+        Frame::containing_address(self.0 as usize & 0x000fffff_fffff000)
     }
 
     #[inline]
@@ -241,7 +241,7 @@ impl RawNotPresentPte {
     ) -> Self {
         assert!(counter < Self::MAX_COUNTER_VALUE);
         Self(
-            frame.physical_address()
+            frame.physical_address() as u64
                 | flags.bits()
                 | (page_type as u64) << Self::TYPE_SHIFT
                 | ((counter as u64) << Self::COUNTER_SHIFT),
@@ -259,7 +259,7 @@ impl RawNotPresentPte {
 
     #[inline]
     pub fn frame(&self) -> Frame {
-        Frame::containing_address(self.0 & 0x000fffff_fffff000)
+        Frame::containing_address(self.0 as usize & 0x000fffff_fffff000)
     }
 
     #[inline]

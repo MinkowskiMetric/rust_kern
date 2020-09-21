@@ -82,39 +82,38 @@ impl StackManager {
         };
 
         // Now we need to map the pages. The lowest address page is the guard page.
-        unsafe { lock_page_table() }
-            .and_then(|mut page_table| {
-                let mut flusher = MapperFlushAll::new();
+        let mut page_table = unsafe { lock_page_table() };
+        let mut flusher = MapperFlushAll::new();
 
-                let result = try {
-                    flusher.consume(page_table.set_not_present(
-                        start_va as u64,
-                        page_entry::KernelStackGuardPagePte::new(),
-                    )?);
+        let result = try {
+            flusher.consume(
+                page_table.set_not_present(start_va, page_entry::KernelStackGuardPagePte::new())?,
+            );
 
-                    for page in 1..pages {
-                        let page = start_va + (page * PAGE_SIZE as usize);
-                        let frame = allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+            for page in 1..pages {
+                let page = start_va + (page * PAGE_SIZE as usize);
+                let frame = allocate_frame().ok_or(MemoryError::OutOfMemory)?;
 
-                        flusher.consume(page_table.map_to(
-                            page as u64,
-                            frame,
-                            PresentPageFlags::WRITABLE | PresentPageFlags::NO_EXECUTE,
-                        )?);
-                    }
+                flusher.consume(page_table.map_to(
+                    page,
+                    frame,
+                    PresentPageFlags::WRITABLE | PresentPageFlags::NO_EXECUTE,
+                )?);
+            }
 
-                    KernelStack::new(start_va, limit_va)
-                };
+            KernelStack::new(start_va, limit_va)
+        };
 
-                flusher.flush(&page_table);
+        flusher.flush(&page_table);
 
-                result
-            })
-            .or_else(|err| {
+        match result {
+            Ok(stack) => Ok(stack),
+            Err(err) => {
                 self.release_kernel_stack(start_va, limit_va)
                     .expect("Failed to release stack");
                 Err(err)
-            })
+            }
+        }
     }
 
     pub fn release_kernel_stack(&mut self, start_va: usize, limit_va: usize) -> Result<()> {
@@ -132,23 +131,16 @@ impl StackManager {
         println!("BEFORE: {} {:?}", range_index, self.ranges);
 
         // Unmap the pages before we modify the range table
-        unsafe { lock_page_table() }
-            .and_then(|mut page_table| {
-                let mut flusher = MapperFlushAll::new();
+        let mut page_table = unsafe { lock_page_table() };
+        let mut flusher = MapperFlushAll::new();
 
-                let result = try {
-                    let mut pos = start_va;
-                    while pos < limit_va {
-                        flusher.consume(page_table.unmap_and_free(pos)?);
-                        pos += PAGE_SIZE as usize;
-                    }
-                };
+        let mut pos = start_va;
+        while pos < limit_va {
+            flusher.consume(page_table.unmap_and_free(pos));
+            pos += PAGE_SIZE as usize;
+        }
 
-                flusher.flush(&page_table);
-
-                result
-            })
-            .expect("Failed to unmap pages"); // Don't propagate this error. If unmapping fails we're in trouble
+        flusher.flush(&page_table);
 
         let range_index = if range_index > 0 && self.ranges[range_index - 1].available {
             // We can join this range up with the previous range

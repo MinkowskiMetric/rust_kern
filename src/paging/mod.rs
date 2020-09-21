@@ -7,18 +7,13 @@ use x86::{controlregs, tlb};
 pub use crate::physmem::{page_align_down, page_align_up, Frame, PAGE_SIZE};
 
 use table::{p1_index, p2_index, p3_index, p4_index};
-pub use table::{
-    HierarchyLevel, MappedPageTable, MappedPageTableMut, PageTable, PageTableIndex, PageTableLevel,
-    L1, L2, L3, L4,
-};
+pub use table::{HierarchyLevel, PageTable, PageTableIndex, PageTableLevel, L1, L2, L3, L4};
 
 pub use heap_region::{allocate_region, Region};
-pub use hyperspace::{map_page, HyperspaceMapping};
-pub use mapper::{MappedMutPteReference, MappedPteReference, Mapper, MapperFlush, MapperFlushAll};
+pub use mapper::{Mapper, MapperFlush, MapperFlushAll};
 pub use stacks::{allocate_kernel_stack, KernelStack, DEFAULT_KERNEL_STACK_PAGES};
 
 mod heap_region;
-mod hyperspace;
 mod mapper;
 mod page_entry;
 mod stacks;
@@ -26,7 +21,6 @@ mod table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryError {
-    OutOfHyperspacePages,
     NotMapped,
     NoRegionAddressSpaceAvailable,
     OutOfMemory,
@@ -38,22 +32,18 @@ pub type Result<T> = core::result::Result<T, MemoryError>;
 
 pub const FIRST_KERNEL_PML4: PageTableIndex = p4_index(0xffff_8000_0000_0000);
 pub const KERNEL_PML4: PageTableIndex = p4_index(0xffff_8000_0000_0000);
-pub const KERNEL_DATA_PML4: PageTableIndex = p4_index(HYPERSPACE_BASE);
+pub const IDENTITY_MAP_PML4: PageTableIndex = p4_index(IDENTITY_MAP_REGION);
+pub const KERNEL_DATA_PML4: PageTableIndex = p4_index(KERNEL_STACKS_BASE);
 
-// Allow 1GB of kernel address space for per CPU data
-pub const PERCPU_BASE: usize = 0xffff_ff7f_c000_0000;
-pub const PERCPU_LIMIT: usize = 0xffff_ff80_0000_0000;
+// We're going to use a whole PML4 entry to identity map memory. For now we will only map the first 4GB
+pub const IDENTITY_MAP_REGION: usize = 0xffff_8080_0000_0000;
 
-// Allow 1GB of kernel address space for hyperspace. We don't use all of it.
-pub const HYPERSPACE_BASE: u64 = 0xffff_ff80_0000_0000;
-pub const HYPERSPACE_LIMIT: u64 = 0xffff_ff80_4000_0000;
+// Allow 1GB of kernel address space for kernel stacks. We don't use all of it.
+pub const KERNEL_STACKS_BASE: usize = 0xffff_ff80_0000_0000;
+pub const KERNEL_STACKS_LIMIT: usize = 0xffff_ff80_4000_0000;
 
-// Allow 1GB for stacks
-pub const KERNEL_STACKS_BASE: usize = 0xffff_ff80_4000_0000;
-pub const KERNEL_STACKS_LIMIT: usize = 0xffff_ff80_8000_0000;
-
-// Allow 1GB for heap regions
-pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_8000_0000;
+// Allow 2GB for the kernel heap
+pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_4000_0000;
 pub const KERNEL_HEAP_LIMIT: usize = 0xffff_ff80_c000_0000;
 
 pub struct ActivePageTable<'a> {
@@ -63,8 +53,8 @@ pub struct ActivePageTable<'a> {
 }
 
 impl<'a> ActivePageTable<'a> {
-    pub fn flush(&self, addr: u64) {
-        unsafe { tlb::flush(addr as usize) };
+    pub fn flush(&self, addr: usize) {
+        unsafe { tlb::flush(addr) };
     }
 
     pub fn flush_all(&self) {
@@ -87,13 +77,15 @@ impl<'a> DerefMut for ActivePageTable<'a> {
     }
 }
 
-pub unsafe fn lock_page_table() -> Result<ActivePageTable<'static>> {
+pub unsafe fn lock_page_table() -> ActivePageTable<'static> {
     static PAGE_LOCK: Mutex<()> = Mutex::new(());
 
     let guard = PAGE_LOCK.lock();
 
-    Mapper::new(Frame::containing_address(controlregs::cr3()))
-        .map(|mapper| ActivePageTable { guard, mapper })
+    ActivePageTable {
+        guard,
+        mapper: Mapper::new(Frame::containing_address(controlregs::cr3() as usize)),
+    }
 }
 
 // The bootloader sets us an amazing challenge - it doesn't tell us where in physical memory
@@ -107,8 +99,8 @@ unsafe fn copy_boot_mapping(
     boot_info: &BootInfo,
     boot_p4_table: &PageTable<L4>,
     init_p4_table: &mut PageTable<L4>,
-    start: u64,
-    end: u64,
+    start: usize,
+    end: usize,
     flags: page_entry::PresentPageFlags,
 ) {
     use table::BootPageTable;
@@ -139,6 +131,71 @@ unsafe fn copy_boot_mapping(
     }
 }
 
+pub const HUGE_PAGE_SIZE: usize = PAGE_SIZE * 512;
+pub const IDENTITY_MAP_SIZE: usize = 0x1_0000_0000;
+
+unsafe fn prepare_identity_mapping(boot_info: &BootInfo, init_p4_table: &mut PageTable<L4>) {
+    use table::BootPageTable;
+    use x86::cpuid::*;
+
+    if CpuId::new()
+        .get_extended_function_info()
+        .unwrap()
+        .has_1gib_pages()
+    {
+        todo!("This would be much easier if we supported 1gib pages");
+    } else {
+        // Identity map the first 4gib of physical address space. This will take a bunch of pages
+        // but should all fit in a single PML4 entry
+        assert_eq!(
+            p4_index(IDENTITY_MAP_REGION + 0xffff_ffff),
+            IDENTITY_MAP_PML4,
+            "Identity map region does not fit in a single PML4 entry"
+        );
+
+        let p3_table =
+            init_p4_table.boot_create_next_table(boot_info, p4_index(IDENTITY_MAP_REGION));
+        let mut va_pos = IDENTITY_MAP_REGION;
+        let va_limit = IDENTITY_MAP_REGION + IDENTITY_MAP_SIZE;
+
+        let mut current_p3_index = p3_index(va_pos);
+        let mut current_p2_table = p3_table.boot_create_next_table(boot_info, current_p3_index);
+
+        while va_pos < va_limit {
+            if p3_index(va_pos) != current_p3_index {
+                current_p3_index = p3_index(va_pos);
+                current_p2_table = p3_table.boot_create_next_table(boot_info, current_p3_index);
+            }
+
+            let phys_pos = va_pos - IDENTITY_MAP_REGION;
+            let frame = Frame::containing_address(phys_pos);
+
+            current_p2_table[p2_index(va_pos)] = page_entry::RawPresentPte::from_frame_and_flags(
+                frame,
+                page_entry::PresentPageFlags::WRITABLE
+                    | page_entry::PresentPageFlags::HUGE_PAGE
+                    | page_entry::PresentPageFlags::NO_EXECUTE
+                    | page_entry::PresentPageFlags::GLOBAL,
+            )
+            .into();
+            va_pos += HUGE_PAGE_SIZE;
+        }
+    }
+}
+
+pub fn phys_to_virt_addr(phys_addr: usize, length: usize) -> usize {
+    assert!(phys_addr + length < IDENTITY_MAP_SIZE);
+    phys_addr + IDENTITY_MAP_REGION
+}
+
+pub fn phys_to_virt<T>(phys_addr: usize) -> *const T {
+    phys_to_virt_addr(phys_addr, core::mem::size_of::<T>()) as *const T
+}
+
+pub fn phys_to_virt_mut<T>(phys_addr: usize) -> *mut T {
+    phys_to_virt_addr(phys_addr, core::mem::size_of::<T>()) as *mut T
+}
+
 pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
     extern "C" {
         static __kernel_start: u8;
@@ -157,8 +214,8 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         static __kernel_end: u8;
     };
 
-    let kernel_start = page_align_down((&__kernel_start as *const u8) as u64);
-    let kernel_end = page_align_up((&__kernel_end as *const u8) as u64);
+    let kernel_start = page_align_down(&__kernel_start as *const u8 as usize);
+    let kernel_end = page_align_up(&__kernel_end as *const u8 as usize);
 
     assert_eq!(
         p4_index(kernel_start),
@@ -184,30 +241,33 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
     let init_page_table_phys =
         physmem::allocate_frame().expect("cannot allocate early page directory");
     let init_page_table = &mut *((init_page_table_phys.physical_address()
-        + boot_info.physical_memory_offset) as *mut PageTable<L4>);
+        + boot_info.physical_memory_offset as usize)
+        as *mut PageTable<L4>);
+
+    prepare_identity_mapping(boot_info, init_page_table);
 
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__text_start as *const u8) as u64,
-        (&__text_end as *const u8) as u64,
+        &__text_start as *const u8 as usize,
+        &__text_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL,
     );
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__rodata_start as *const u8) as u64,
-        (&__rodata_end as *const u8) as u64,
+        &__rodata_start as *const u8 as usize,
+        &__rodata_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
     );
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__data_start as *const u8) as u64,
-        (&__data_end as *const u8) as u64,
+        &__data_start as *const u8 as usize,
+        &__data_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL
             | page_entry::PresentPageFlags::NO_EXECUTE
             | page_entry::PresentPageFlags::WRITABLE,
@@ -216,24 +276,24 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__tdata_start as *const u8) as u64,
-        (&__tdata_end as *const u8) as u64,
+        &__tdata_start as *const u8 as usize,
+        &__tdata_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
     );
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__tbss_start as *const u8) as u64,
-        (&__tbss_end as *const u8) as u64,
+        &__tbss_start as *const u8 as usize,
+        &__tbss_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
     );
     copy_boot_mapping(
         boot_info,
         bootloader_page_table,
         init_page_table,
-        (&__bss_start as *const u8) as u64,
-        (&__bss_end as *const u8) as u64,
+        &__bss_start as *const u8 as usize,
+        &__bss_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL
             | page_entry::PresentPageFlags::NO_EXECUTE
             | page_entry::PresentPageFlags::WRITABLE,
@@ -258,25 +318,18 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         page_entry::PresentPageFlags::NO_EXECUTE | page_entry::PresentPageFlags::WRITABLE,
     );
 
-    // Set up hyperspace before switching to the page table
-    hyperspace::init(boot_info, init_page_table);
-
     // Switch to the page table
-    controlregs::cr3_write(init_page_table_phys.physical_address());
-
-    // Complete hyperspace setup
-    hyperspace::init_post_paging();
+    controlregs::cr3_write(init_page_table_phys.physical_address() as u64);
 
     // Initialize the stack and region manager
     stacks::init(KERNEL_STACKS_BASE, KERNEL_STACKS_LIMIT)
         .expect("Failed to initialize kernel stacks");
-    heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT)
-        .expect("Failed to initialize heap regions");
+    heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT);
 
     initialize_tcb(cpuid).expect("Failed to initialize tcb for CPU")
 }
 
-unsafe fn initialize_tcb(cpuid: usize) -> Result<usize> {
+unsafe fn initialize_tcb(_cpuid: usize) -> Result<usize> {
     extern "C" {
         static mut __tdata_start: u8;
         static mut __tdata_end: u8;
@@ -286,41 +339,19 @@ unsafe fn initialize_tcb(cpuid: usize) -> Result<usize> {
 
     let tcb_start_addr = &__tdata_start as *const _ as usize;
     let tcb_end_addr = &__tbss_end as *const _ as usize;
-    let per_cpu_size = page_align_up((tcb_end_addr - tcb_start_addr) as u64) as usize;
+    let per_cpu_size = page_align_up(tcb_end_addr - tcb_start_addr);
     let tbss_offset = &__tbss_start as *const _ as usize - tcb_start_addr;
 
-    assert!(
-        (PERCPU_LIMIT - PERCPU_BASE) / per_cpu_size > cpuid,
-        "Not enough room for cpus"
-    );
+    let slot_region = allocate_region(per_cpu_size / PAGE_SIZE)?;
+    let slot_start_addr = slot_region.start();
+    // The region may be too big. No matter, just use the start of it
+    let slot_limit_addr = slot_region.start() + per_cpu_size;
 
-    let slot_start_addr = PERCPU_BASE + (cpuid * per_cpu_size);
-    let slot_limit_addr = slot_start_addr + per_cpu_size;
-
-    lock_page_table().and_then(|mut page_table| {
-        let mut flusher = MapperFlushAll::new();
-
-        let result = try {
-            let mut map_pos = slot_start_addr;
-
-            while map_pos < slot_limit_addr {
-                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
-
-                flusher.consume(page_table.map_to(
-                    map_pos as u64,
-                    frame,
-                    page_entry::PresentPageFlags::GLOBAL
-                        | page_entry::PresentPageFlags::WRITABLE
-                        | page_entry::PresentPageFlags::NO_EXECUTE,
-                )?);
-                map_pos += PAGE_SIZE as usize;
-            }
-        };
-
-        flusher.flush(&page_table);
-
-        result
-    })?;
+    {
+        // Leak the region - we will never free it
+        use core::mem::ManuallyDrop;
+        let _ = ManuallyDrop::new(slot_region);
+    }
 
     core::ptr::copy(
         &__tdata_start as *const u8,

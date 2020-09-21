@@ -334,7 +334,9 @@ impl HeapRegionList {
                     removed_region_list.next.as_mut().unwrap().next = self.head.next.take();
                     self.head.next = removed_region_list.next.take();
                 } else {
-                    core::ptr::drop_in_place(removed_region_list.next.unwrap() as *mut HeapRegion);
+                    // We have to move the payload out of the region that it is held in before we drop it, otherwise we end up with
+                    // the memory going away part way through the drop which is weird.
+                    core::mem::drop(removed_region_list.next.unwrap());
                 }
             }
         });

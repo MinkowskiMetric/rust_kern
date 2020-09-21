@@ -1,17 +1,16 @@
 use super::page_entry::{PresentPageFlags, RawNotPresentPte, RawPresentPte, RawPte};
 use super::{
-    map_page, p1_index, p2_index, p3_index, p4_index, ActivePageTable, HyperspaceMapping,
-    MappedPageTable, MappedPageTableMut, PageTable, PageTableIndex, PageTableLevel, Result, L1, L4,
+    p1_index, p2_index, p3_index, p4_index, phys_to_virt_mut, ActivePageTable, PageTable, Result,
+    L4,
 };
 use crate::physmem::{self, Frame};
 use core::mem::ManuallyDrop;
-use core::ops::{Deref, DerefMut};
 
 #[must_use = "Must use a mapper flush"]
-pub struct MapperFlush(u64);
+pub struct MapperFlush(usize);
 
 impl MapperFlush {
-    pub fn new(addr: u64) -> Self {
+    pub fn new(addr: usize) -> Self {
         Self(addr)
     }
 
@@ -62,95 +61,58 @@ impl Drop for MapperFlushAll {
     }
 }
 
-pub struct MappedPteReference<L: PageTableLevel> {
-    page_table: MappedPageTable<L>,
-    index: PageTableIndex,
-}
-
-impl<L: PageTableLevel> Deref for MappedPteReference<L> {
-    type Target = RawPte;
-    fn deref(&self) -> &Self::Target {
-        &self.page_table[self.index]
-    }
-}
-
-pub struct MappedMutPteReference<L: PageTableLevel> {
-    page_table: MappedPageTableMut<L>,
-    index: PageTableIndex,
-}
-
-impl<'a, L: PageTableLevel> Deref for MappedMutPteReference<L> {
-    type Target = RawPte;
-    fn deref(&self) -> &Self::Target {
-        &self.page_table[self.index]
-    }
-}
-
-impl<'a, L: PageTableLevel> DerefMut for MappedMutPteReference<L> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.page_table[self.index]
-    }
-}
-
 pub struct Mapper {
-    p4_mapping: HyperspaceMapping,
+    p4: &'static mut PageTable<L4>,
 }
 
 impl Mapper {
-    pub unsafe fn new(p4_frame: Frame) -> Result<Self> {
-        map_page(p4_frame).map(|p4_mapping| Self { p4_mapping })
+    pub unsafe fn new(p4_frame: Frame) -> Self {
+        Self {
+            p4: &mut *phys_to_virt_mut(p4_frame.physical_address()),
+        }
     }
 
     pub fn p4(&self) -> &PageTable<L4> {
-        unsafe { &*self.p4_mapping.as_ptr() }
+        &self.p4
     }
 
     pub fn p4_mut(&mut self) -> &mut PageTable<L4> {
-        unsafe { &mut *self.p4_mapping.as_mut_ptr() }
+        &mut self.p4
     }
 
-    pub fn get_pte_for_address(&self, addr: u64) -> Result<MappedPteReference<L1>> {
+    pub fn get_pte_for_address<'a>(&'a self, addr: usize) -> Option<&'a RawPte> {
         self.p4()
             .next_table(p4_index(addr))
             .and_then(|p3| p3.next_table(p3_index(addr)))
             .and_then(|p2| p2.next_table(p2_index(addr)))
-            .map(|p1| MappedPteReference {
-                page_table: p1,
-                index: p1_index(addr),
-            })
+            .map(|p1| &p1[p1_index(addr)])
     }
 
-    pub fn get_pte_mut_for_address(&mut self, addr: u64) -> Result<MappedMutPteReference<L1>> {
+    pub fn get_pte_mut_for_address<'a>(&'a mut self, addr: usize) -> Option<&'a mut RawPte> {
         self.p4_mut()
             .next_table_mut(p4_index(addr))
-            .and_then(|mut p3| p3.next_table_mut(p3_index(addr)))
-            .and_then(|mut p2| p2.next_table_mut(p2_index(addr)))
-            .map(|p1| MappedMutPteReference {
-                page_table: p1,
-                index: p1_index(addr),
-            })
+            .and_then(|p3| p3.next_table_mut(p3_index(addr)))
+            .and_then(|p2| p2.next_table_mut(p2_index(addr)))
+            .map(|p1| &mut p1[p1_index(addr)])
     }
 
-    pub fn create_pte_mut_for_address(&mut self, addr: u64) -> Result<MappedMutPteReference<L1>> {
+    pub fn create_pte_mut_for_address<'a>(&'a mut self, addr: usize) -> Result<&'a mut RawPte> {
         let p1 = self
             .p4_mut()
             .create_next_table(p4_index(addr))?
             .create_next_table(p3_index(addr))?
             .create_next_table(p2_index(addr))?;
 
-        Ok(MappedMutPteReference {
-            page_table: p1,
-            index: p1_index(addr),
-        })
+        Ok(&mut p1[p1_index(addr)])
     }
 
     pub fn map_to(
         &mut self,
-        page: u64,
+        page: usize,
         frame: Frame,
         flags: PresentPageFlags,
     ) -> Result<MapperFlush> {
-        let mut pte = self.create_pte_mut_for_address(page)?;
+        let pte = self.create_pte_mut_for_address(page)?;
 
         assert_eq!(*pte, RawPte::unused());
         assert!(pte.is_unused());
@@ -158,7 +120,7 @@ impl Mapper {
         Ok(MapperFlush::new(page))
     }
 
-    pub fn unmap_and_free(&mut self, page: usize) -> Result<MapperFlush> {
+    pub fn unmap_and_free(&mut self, page: usize) -> MapperFlush {
         self.unmap_and_free_and_replace(page, RawNotPresentPte::unused())
     }
 
@@ -166,22 +128,22 @@ impl Mapper {
         &mut self,
         page: usize,
         new_pte: impl Into<RawNotPresentPte>,
-    ) -> Result<MapperFlush> {
+    ) -> MapperFlush {
         // We can improve this - particularly we can avoid all of the flushing
         // and not create page tables. Also, we should be able to delete page tables if they're no longer needed
-        let mut pte = self.create_pte_mut_for_address(page as u64)?;
+        let pte = self
+            .get_pte_mut_for_address(page)
+            .filter(|pte| pte.is_present())
+            .expect("Unmapping page which is not mapped");
 
-        if pte.is_present() {
-            physmem::deallocate_frame(pte.present().unwrap().frame());
-        }
-
+        physmem::deallocate_frame(pte.present().unwrap().frame());
         *pte = new_pte.into().into();
-        Ok(MapperFlush::new(page as u64))
+        MapperFlush::new(page)
     }
 
     pub fn set_present(
         &mut self,
-        page: u64,
+        page: usize,
         new_pte: impl Into<RawPresentPte>,
     ) -> Result<MapperFlush> {
         self.do_set_pte(page, new_pte.into())
@@ -189,14 +151,14 @@ impl Mapper {
 
     pub fn set_not_present(
         &mut self,
-        page: u64,
+        page: usize,
         new_pte: impl Into<RawNotPresentPte>,
     ) -> Result<MapperFlush> {
         self.do_set_pte(page, new_pte.into())
     }
 
-    fn do_set_pte(&mut self, page: u64, new_pte: impl Into<RawPte>) -> Result<MapperFlush> {
-        let mut pte = self.create_pte_mut_for_address(page)?;
+    fn do_set_pte(&mut self, page: usize, new_pte: impl Into<RawPte>) -> Result<MapperFlush> {
+        let pte = self.create_pte_mut_for_address(page)?;
 
         // We should only be doing this for not present pages
         assert!(!pte.is_present());

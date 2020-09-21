@@ -1,5 +1,6 @@
-use super::page_entry::{PresentPageFlags, RawPresentPte, RawPte};
-use super::{map_page, HyperspaceMapping, MemoryError, Result};
+use super::page_entry::{PresentPageFlags, RawNotPresentPte, RawPresentPte, RawPte};
+use super::Result;
+use super::{phys_to_virt, phys_to_virt_mut};
 use crate::physmem;
 use crate::physmem::Frame;
 use bootloader::BootInfo;
@@ -7,7 +8,6 @@ use core::convert::{Infallible, TryFrom};
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::TryFromIntError;
-use core::ops::{Deref, DerefMut};
 use core::ops::{Index, IndexMut};
 
 const ENTRY_COUNT: u16 = 512;
@@ -91,19 +91,19 @@ impl From<TryFromIntError> for InvalidPageOffset {
     }
 }
 
-pub const fn p1_index(va: u64) -> PageTableIndex {
+pub const fn p1_index(va: usize) -> PageTableIndex {
     PageTableIndex::new_truncate((va >> 12) as u16)
 }
 
-pub const fn p2_index(va: u64) -> PageTableIndex {
+pub const fn p2_index(va: usize) -> PageTableIndex {
     PageTableIndex::new_truncate((va >> 12 >> 9) as u16)
 }
 
-pub const fn p3_index(va: u64) -> PageTableIndex {
+pub const fn p3_index(va: usize) -> PageTableIndex {
     PageTableIndex::new_truncate((va >> 12 >> 9 >> 9) as u16)
 }
 
-pub const fn p4_index(va: u64) -> PageTableIndex {
+pub const fn p4_index(va: usize) -> PageTableIndex {
     PageTableIndex::new_truncate((va >> 12 >> 9 >> 9 >> 9) as u16)
 }
 
@@ -148,7 +148,7 @@ pub trait BootPageTable<L: PageTableLevel> {
         &'a self,
         boot_info: &BootInfo,
         index: PageTableIndex,
-    ) -> Result<&'a PageTable<L::NextLevel>>
+    ) -> Option<&'a PageTable<L::NextLevel>>
     where
         L: HierarchyLevel;
 
@@ -156,7 +156,7 @@ pub trait BootPageTable<L: PageTableLevel> {
         &'a mut self,
         boot_info: &BootInfo,
         index: PageTableIndex,
-    ) -> Result<&'a mut PageTable<L::NextLevel>>
+    ) -> Option<&'a mut PageTable<L::NextLevel>>
     where
         L: HierarchyLevel;
 }
@@ -166,11 +166,11 @@ pub trait BootPageTable<L: PageTableLevel> {
 pub struct PageTable<L: PageTableLevel>([RawPte; ENTRY_COUNT as usize], PhantomData<L>);
 
 impl<L: PageTableLevel> PageTable<L> {
-    pub unsafe fn at_virtual_address(addr: u64) -> &'static Self {
+    pub unsafe fn at_virtual_address(addr: usize) -> &'static Self {
         &*(addr as *const Self)
     }
 
-    pub unsafe fn at_virtual_address_mut(addr: u64) -> &'static mut Self {
+    pub unsafe fn at_virtual_address_mut(addr: usize) -> &'static mut Self {
         &mut *(addr as *mut Self)
     }
 
@@ -195,7 +195,7 @@ impl<L: 'static + HierarchyLevel> BootPageTable<L> for PageTable<L> {
         boot_info: &BootInfo,
         index: PageTableIndex,
     ) -> &'a mut PageTable<L::NextLevel> {
-        if self.next_table_frame(index).is_err() {
+        if self.next_table_frame(index).is_none() {
             assert!(
                 !self[index]
                     .present()
@@ -219,9 +219,11 @@ impl<L: 'static + HierarchyLevel> BootPageTable<L> for PageTable<L> {
         &'a self,
         boot_info: &BootInfo,
         index: PageTableIndex,
-    ) -> Result<&'a PageTable<L::NextLevel>> {
+    ) -> Option<&'a PageTable<L::NextLevel>> {
         self.next_table_frame(index).map(|f| {
-            PageTable::at_virtual_address(boot_info.physical_memory_offset + f.physical_address())
+            PageTable::at_virtual_address(
+                boot_info.physical_memory_offset as usize + f.physical_address(),
+            )
         })
     }
 
@@ -229,21 +231,21 @@ impl<L: 'static + HierarchyLevel> BootPageTable<L> for PageTable<L> {
         &'a mut self,
         boot_info: &BootInfo,
         index: PageTableIndex,
-    ) -> Result<&'a mut PageTable<L::NextLevel>> {
+    ) -> Option<&'a mut PageTable<L::NextLevel>> {
         self.next_table_frame(index).map(|f| {
             PageTable::at_virtual_address_mut(
-                boot_info.physical_memory_offset + f.physical_address(),
+                boot_info.physical_memory_offset as usize + f.physical_address(),
             )
         })
     }
 }
 
 impl<L: 'static + HierarchyLevel> PageTable<L> {
-    pub fn create_next_table(
-        &mut self,
+    pub fn create_next_table<'a>(
+        &'a mut self,
         index: PageTableIndex,
-    ) -> Result<MappedPageTableMut<L::NextLevel>> {
-        if self.next_table_frame(index) == Err(MemoryError::NotMapped) {
+    ) -> Result<&'a mut PageTable<L::NextLevel>> {
+        if self.next_table_frame(index).is_none() {
             assert!(
                 !self[index]
                     .present()
@@ -260,27 +262,45 @@ impl<L: 'static + HierarchyLevel> PageTable<L> {
             .into();
         }
 
-        self.next_table_mut(index)
+        Ok(self.next_table_mut(index).unwrap())
     }
 
-    pub fn next_table(&self, index: PageTableIndex) -> Result<MappedPageTable<L::NextLevel>> {
+    pub fn next_table<'a>(&'a self, index: PageTableIndex) -> Option<&'a PageTable<L::NextLevel>> {
         self.next_table_frame(index)
-            .and_then(|f| unsafe { MappedPageTable::from_frame(f) })
+            .map(|f| unsafe { &*phys_to_virt(f.physical_address() as usize) })
     }
 
-    pub fn next_table_mut(
-        &mut self,
+    pub fn next_table_mut<'a>(
+        &'a mut self,
         index: PageTableIndex,
-    ) -> Result<MappedPageTableMut<L::NextLevel>> {
+    ) -> Option<&'a mut PageTable<L::NextLevel>> {
         self.next_table_frame(index)
-            .and_then(|f| unsafe { MappedPageTableMut::from_frame(f) })
+            .map(|f| unsafe { &mut *phys_to_virt_mut(f.physical_address() as usize) })
     }
 
-    pub fn next_table_frame(&self, index: PageTableIndex) -> Result<Frame> {
+    pub fn next_table_frame(&self, index: PageTableIndex) -> Option<Frame> {
         self[index]
             .present()
+            .ok()
             .map(|present_pte| present_pte.frame())
-            .or(Err(MemoryError::NotMapped))
+    }
+}
+
+impl PageTable<L1> {
+    pub fn set_present(&mut self, index: PageTableIndex, new_pte: impl Into<RawPresentPte>) {
+        self.do_set_pte(index, new_pte.into());
+    }
+
+    pub fn set_not_present(&mut self, index: PageTableIndex, new_pte: impl Into<RawNotPresentPte>) {
+        self.do_set_pte(index, new_pte.into());
+    }
+
+    fn do_set_pte(&mut self, index: PageTableIndex, new_pte: impl Into<RawPte>) {
+        let pte = &self[index];
+
+        // We should only be doing this for not present pages
+        assert!(!pte.is_present());
+        self.0[usize::from(index)] = new_pte.into();
     }
 }
 
@@ -295,55 +315,5 @@ impl<L: PageTableLevel> Index<PageTableIndex> for PageTable<L> {
 impl<L: PageTableLevel> IndexMut<PageTableIndex> for PageTable<L> {
     fn index_mut(&mut self, index: PageTableIndex) -> &mut Self::Output {
         &mut self.0[usize::from(index)]
-    }
-}
-
-pub struct MappedPageTable<L: PageTableLevel> {
-    mapping: HyperspaceMapping,
-    _marker: PhantomData<L>,
-}
-
-impl<L: PageTableLevel> MappedPageTable<L> {
-    pub unsafe fn from_frame(frame: Frame) -> Result<Self> {
-        map_page(frame).map(|mapping| Self {
-            mapping,
-            _marker: PhantomData,
-        })
-    }
-}
-
-impl<L: PageTableLevel> Deref for MappedPageTable<L> {
-    type Target = PageTable<L>;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.mapping.as_ptr() }
-    }
-}
-
-pub struct MappedPageTableMut<L: PageTableLevel> {
-    mapping: HyperspaceMapping,
-    _marker: PhantomData<L>,
-}
-
-impl<L: PageTableLevel> MappedPageTableMut<L> {
-    pub unsafe fn from_frame(frame: Frame) -> Result<Self> {
-        map_page(frame).map(|mapping| Self {
-            mapping,
-            _marker: PhantomData,
-        })
-    }
-}
-
-impl<L: PageTableLevel> Deref for MappedPageTableMut<L> {
-    type Target = PageTable<L>;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.mapping.as_ptr() }
-    }
-}
-
-impl<L: PageTableLevel> DerefMut for MappedPageTableMut<L> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.mapping.as_mut_ptr() }
     }
 }

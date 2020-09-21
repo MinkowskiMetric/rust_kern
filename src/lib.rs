@@ -6,6 +6,7 @@
 #![feature(alloc_error_handler)]
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
+#![feature(const_panic)]
 #![feature(custom_test_frameworks)]
 #![feature(maybe_uninit_extra)]
 #![feature(never_type)]

@@ -4,7 +4,7 @@ pub struct BumpAllocator {
     areas: MemoryMapIterator,
     current_area: Option<&'static MemoryArea>,
     used_frames: usize,
-    next_free_frame: u64,
+    next_free_frame: usize,
 }
 
 impl BumpAllocator {

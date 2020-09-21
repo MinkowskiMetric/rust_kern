@@ -15,18 +15,18 @@ pub enum MemoryAreaType {
 #[repr(packed)]
 #[derive(Copy, Clone, Debug)]
 pub struct MemoryArea {
-    pub start: u64,
-    pub limit: u64,
+    pub start: usize,
+    pub limit: usize,
     pub mem_type: MemoryAreaType,
 }
 
-pub const PAGE_SIZE: u64 = 4096;
+pub const PAGE_SIZE: usize = 4096;
 
-pub fn page_align_down(addr: u64) -> u64 {
+pub fn page_align_down(addr: usize) -> usize {
     addr & !(PAGE_SIZE - 1)
 }
 
-pub fn page_align_up(addr: u64) -> u64 {
+pub fn page_align_up(addr: usize) -> usize {
     page_align_down(addr + PAGE_SIZE - 1)
 }
 
@@ -116,8 +116,8 @@ pub unsafe fn init(boot_info: &BootInfo) {
                 break;
             }
             MEMORY_MAP[mem_position] = MemoryArea {
-                start: memory_region.range.start_addr(),
-                limit: memory_region.range.end_addr(),
+                start: memory_region.range.start_addr() as usize,
+                limit: memory_region.range.end_addr() as usize,
                 mem_type: MemoryAreaType::Usable,
             };
             mem_position += 1;
@@ -135,8 +135,8 @@ pub unsafe fn init(boot_info: &BootInfo) {
                 break;
             }
             MEMORY_MAP[mem_position] = MemoryArea {
-                start: memory_region.range.start_addr(),
-                limit: memory_region.range.end_addr(),
+                start: memory_region.range.start_addr() as usize,
+                limit: memory_region.range.end_addr() as usize,
                 mem_type: MemoryAreaType::Reclaimable,
             };
             mem_position += 1;
@@ -149,18 +149,18 @@ pub unsafe fn init(boot_info: &BootInfo) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Frame(u64);
+pub struct Frame(usize);
 
 impl Frame {
-    pub fn containing_address(addr: u64) -> Self {
+    pub fn containing_address(addr: usize) -> Self {
         Self(page_align_down(addr) / PAGE_SIZE)
     }
 
-    pub fn index(&self) -> u64 {
+    pub fn index(&self) -> usize {
         self.0
     }
 
-    pub fn physical_address(&self) -> u64 {
+    pub fn physical_address(&self) -> usize {
         self.index() * PAGE_SIZE
     }
 }
