@@ -2,9 +2,26 @@ use crate::init_mutex::InitMutex;
 use core::alloc::{GlobalAlloc, Layout};
 use simple_allocator::SimpleAllocator;
 
+mod free_list;
 mod simple_allocator;
 
 static ALLOCATOR_IMPL: InitMutex<SimpleAllocator> = InitMutex::new();
+
+pub(self) fn align_down(addr: usize, align: usize) -> usize {
+    if align.is_power_of_two() {
+        addr & !(align - 1)
+    } else if align == 0 {
+        addr
+    } else {
+        panic!("`align` must be a power of 2");
+    }
+}
+
+/// Align upwards. Returns the smallest x with alignment `align`
+/// so that x >= addr. The alignment must be a power of 2.
+pub(self) fn align_up(addr: usize, align: usize) -> usize {
+    align_down(addr + align - 1, align)
+}
 
 pub unsafe fn init() {
     ALLOCATOR_IMPL.init(SimpleAllocator::new());
