@@ -93,28 +93,25 @@ pub unsafe fn lock_page_table() -> ActivePageTable<'static> {
 // and we can use that to copy the page table entries.
 
 unsafe fn copy_boot_mapping(
-    boot_info: &BootInfo,
     boot_p4_table: &PageTable<L4>,
     init_p4_table: &mut PageTable<L4>,
     start: usize,
     end: usize,
     flags: page_entry::PresentPageFlags,
-) {
-    use table::BootPageTable;
-
+) -> Result<()> {
     let mut virt_page = start;
     while virt_page < end {
         let init_p1_table = init_p4_table
-            .boot_create_next_table(boot_info, p4_index(virt_page))
-            .boot_create_next_table(boot_info, p3_index(virt_page))
-            .boot_create_next_table(boot_info, p2_index(virt_page));
+            .create_next_table(p4_index(virt_page))?
+            .create_next_table(p3_index(virt_page))?
+            .create_next_table(p2_index(virt_page))?;
 
         let boot_p1_table = boot_p4_table
-            .boot_next_table(boot_info, p4_index(virt_page))
+            .next_table(p4_index(virt_page))
             .unwrap()
-            .boot_next_table(boot_info, p3_index(virt_page))
+            .next_table(p3_index(virt_page))
             .unwrap()
-            .boot_next_table(boot_info, p2_index(virt_page))
+            .next_table(p2_index(virt_page))
             .unwrap();
 
         let boot_p1_entry = boot_p1_table[p1_index(virt_page)]
@@ -126,13 +123,14 @@ unsafe fn copy_boot_mapping(
 
         virt_page += PAGE_SIZE;
     }
+
+    Ok(())
 }
 
 pub const HUGE_PAGE_SIZE: usize = PAGE_SIZE * 512;
 pub const IDENTITY_MAP_SIZE: usize = 0x1_0000_0000;
 
-unsafe fn prepare_identity_mapping(boot_info: &BootInfo, init_p4_table: &mut PageTable<L4>) {
-    use table::BootPageTable;
+unsafe fn prepare_identity_mapping(init_p4_table: &mut PageTable<L4>) -> Result<()> {
     use x86::cpuid::*;
 
     if CpuId::new()
@@ -150,18 +148,17 @@ unsafe fn prepare_identity_mapping(boot_info: &BootInfo, init_p4_table: &mut Pag
             "Identity map region does not fit in a single PML4 entry"
         );
 
-        let p3_table =
-            init_p4_table.boot_create_next_table(boot_info, p4_index(IDENTITY_MAP_REGION));
+        let p3_table = init_p4_table.create_next_table(p4_index(IDENTITY_MAP_REGION))?;
         let mut va_pos = IDENTITY_MAP_REGION;
         let va_limit = IDENTITY_MAP_REGION + IDENTITY_MAP_SIZE;
 
         let mut current_p3_index = p3_index(va_pos);
-        let mut current_p2_table = p3_table.boot_create_next_table(boot_info, current_p3_index);
+        let mut current_p2_table = p3_table.create_next_table(current_p3_index)?;
 
         while va_pos < va_limit {
             if p3_index(va_pos) != current_p3_index {
                 current_p3_index = p3_index(va_pos);
-                current_p2_table = p3_table.boot_create_next_table(boot_info, current_p3_index);
+                current_p2_table = p3_table.create_next_table(current_p3_index)?;
             }
 
             let phys_pos = va_pos - IDENTITY_MAP_REGION;
@@ -178,6 +175,8 @@ unsafe fn prepare_identity_mapping(boot_info: &BootInfo, init_p4_table: &mut Pag
             va_pos += HUGE_PAGE_SIZE;
         }
     }
+
+    Ok(())
 }
 
 pub fn phys_to_virt_addr(phys_addr: usize, length: usize) -> usize {
@@ -193,7 +192,14 @@ pub fn phys_to_virt_mut<T>(phys_addr: usize) -> *mut T {
     phys_to_virt_addr(phys_addr, core::mem::size_of::<T>()) as *mut T
 }
 
-pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
+pub unsafe fn pre_init(boot_info: &BootInfo) {
+    assert_eq!(
+        boot_info.physical_memory_offset as usize, IDENTITY_MAP_REGION,
+        "Bootloader has not mapped identity memory in the right place"
+    );
+}
+
+pub unsafe fn init(cpuid: usize) -> usize {
     extern "C" {
         static __kernel_start: u8;
         static __text_start: u8;
@@ -231,36 +237,32 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
 
     // How do we get hold of the bootloader page table. Fortunately, the bootloader identity maps
     // enough physical memory that we can access it directly like this.
-    let bootloader_page_table =
-        &*((controlregs::cr3() + boot_info.physical_memory_offset) as *const PageTable<L4>);
+    let bootloader_page_table = &*phys_to_virt(controlregs::cr3() as usize);
 
     // Allocate a new page table
     let init_page_table_phys =
         physmem::allocate_frame().expect("cannot allocate early page directory");
-    let init_page_table = &mut *((init_page_table_phys.physical_address()
-        + boot_info.physical_memory_offset as usize)
-        as *mut PageTable<L4>);
+    let init_page_table = &mut *phys_to_virt_mut(init_page_table_phys.physical_address());
 
-    prepare_identity_mapping(boot_info, init_page_table);
+    prepare_identity_mapping(init_page_table).expect("Failed to initialize identity mapping");
 
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__text_start as *const u8 as usize,
         &__text_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__rodata_start as *const u8 as usize,
         &__rodata_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__data_start as *const u8 as usize,
@@ -268,25 +270,25 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         page_entry::PresentPageFlags::GLOBAL
             | page_entry::PresentPageFlags::NO_EXECUTE
             | page_entry::PresentPageFlags::WRITABLE,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__tdata_start as *const u8 as usize,
         &__tdata_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__tbss_start as *const u8 as usize,
         &__tbss_end as *const u8 as usize,
         page_entry::PresentPageFlags::GLOBAL | page_entry::PresentPageFlags::NO_EXECUTE,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         &__bss_start as *const u8 as usize,
@@ -294,35 +296,22 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
         page_entry::PresentPageFlags::GLOBAL
             | page_entry::PresentPageFlags::NO_EXECUTE
             | page_entry::PresentPageFlags::WRITABLE,
-    );
+    )
+    .expect("Failed to create initial mapping");
     copy_boot_mapping(
-        boot_info,
         bootloader_page_table,
         init_page_table,
         boot_stack_start,
         boot_stack_end,
         page_entry::PresentPageFlags::NO_EXECUTE | page_entry::PresentPageFlags::WRITABLE,
-    );
-
-    // We need to copy an additional mapping for VGA memory since the logger uses it
-    // TODOTODOTODO - should fix this
-    copy_boot_mapping(
-        boot_info,
-        bootloader_page_table,
-        init_page_table,
-        0xb8000,
-        0xb9000,
-        page_entry::PresentPageFlags::NO_EXECUTE | page_entry::PresentPageFlags::WRITABLE,
-    );
+    )
+    .expect("Failed to create initial mapping");
 
     // Switch to the page table
     controlregs::cr3_write(init_page_table_phys.physical_address() as u64);
 
     // Initialize the region manager
     heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT);
-
-    let s = allocate_kernel_stack(3);
-    core::mem::drop(s);
 
     initialize_tcb(cpuid).expect("Failed to initialize tcb for CPU")
 }

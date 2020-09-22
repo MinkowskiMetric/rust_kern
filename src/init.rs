@@ -11,6 +11,8 @@ use core::panic::PanicInfo;
 #[no_mangle]
 #[cfg(not(test))]
 pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
+    paging::pre_init(boot_info);
+
     println!("Starting kernel...");
 
     gdt::init();
@@ -26,7 +28,7 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     // Eventually we will pass this to the paging manager instead of the one from the bootloader
     let memory_map: Vec<_> = boot_info.memory_map.iter().cloned().collect();
 
-    let tcb_offset = paging::init(0, boot_info);
+    let tcb_offset = paging::init(0);
 
     // Once paging is up and running, we can allocate a new kernel stack
     // for what will become our idle thread

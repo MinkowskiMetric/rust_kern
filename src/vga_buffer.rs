@@ -1,3 +1,4 @@
+use crate::paging::phys_to_virt_mut;
 use core::fmt;
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -120,7 +121,7 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        buffer: unsafe { &mut *phys_to_virt_mut(0xb8000) },
     });
 }
 

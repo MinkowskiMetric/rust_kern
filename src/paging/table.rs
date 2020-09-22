@@ -3,7 +3,6 @@ use super::Result;
 use super::{phys_to_virt, phys_to_virt_mut};
 use crate::physmem;
 use crate::physmem::Frame;
-use bootloader::BootInfo;
 use core::convert::{Infallible, TryFrom};
 use core::fmt;
 use core::marker::PhantomData;
@@ -135,32 +134,6 @@ impl HierarchyLevel for L2 {
     type NextLevel = L1;
 }
 
-pub trait BootPageTable<L: PageTableLevel> {
-    unsafe fn boot_create_next_table<'a>(
-        &'a mut self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> &'a mut PageTable<L::NextLevel>
-    where
-        L: HierarchyLevel;
-
-    unsafe fn boot_next_table<'a>(
-        &'a self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> Option<&'a PageTable<L::NextLevel>>
-    where
-        L: HierarchyLevel;
-
-    unsafe fn boot_next_table_mut<'a>(
-        &'a mut self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> Option<&'a mut PageTable<L::NextLevel>>
-    where
-        L: HierarchyLevel;
-}
-
 #[repr(C)]
 #[repr(align(4096))]
 pub struct PageTable<L: PageTableLevel>([RawPte; ENTRY_COUNT as usize], PhantomData<L>);
@@ -186,57 +159,6 @@ impl<L: PageTableLevel> PageTable<L> {
         for entry in self.iter_mut() {
             *entry = RawPte::unused();
         }
-    }
-}
-
-impl<L: 'static + HierarchyLevel> BootPageTable<L> for PageTable<L> {
-    unsafe fn boot_create_next_table<'a>(
-        &'a mut self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> &'a mut PageTable<L::NextLevel> {
-        if self.next_table_frame(index).is_none() {
-            assert!(
-                !self[index]
-                    .present()
-                    .map(|present_pte| present_pte.is_huge())
-                    .unwrap_or(false),
-                "Huge page not supported"
-            );
-            let new_page_table = physmem::allocate_frame()
-                .expect("Failed to allocate frame in boot_create_next_table");
-            self[index] = RawPresentPte::from_frame_and_flags(
-                new_page_table,
-                PresentPageFlags::WRITABLE | PresentPageFlags::USER_ACCESSIBLE,
-            )
-            .into();
-        }
-
-        self.boot_next_table_mut(boot_info, index).unwrap()
-    }
-
-    unsafe fn boot_next_table<'a>(
-        &'a self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> Option<&'a PageTable<L::NextLevel>> {
-        self.next_table_frame(index).map(|f| {
-            PageTable::at_virtual_address(
-                boot_info.physical_memory_offset as usize + f.physical_address(),
-            )
-        })
-    }
-
-    unsafe fn boot_next_table_mut<'a>(
-        &'a mut self,
-        boot_info: &BootInfo,
-        index: PageTableIndex,
-    ) -> Option<&'a mut PageTable<L::NextLevel>> {
-        self.next_table_frame(index).map(|f| {
-            PageTable::at_virtual_address_mut(
-                boot_info.physical_memory_offset as usize + f.physical_address(),
-            )
-        })
     }
 }
 

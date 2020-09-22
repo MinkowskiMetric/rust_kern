@@ -41,3 +41,5 @@ kernel-stack-address = "0x10000000"
 kernel-stack-size = 8
 
 boot-info-address = "0x20000000"
+
+physical-memory-offset = "0xffff808000000000"
