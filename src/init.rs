@@ -8,9 +8,7 @@ use alloc::vec::Vec;
 use bootloader::{bootinfo::MemoryRegion, BootInfo};
 use core::panic::PanicInfo;
 
-#[no_mangle]
-#[cfg(not(test))]
-pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
+pub unsafe fn kstart(boot_info: &'static BootInfo, func: impl FnOnce() -> ! + 'static) -> ! {
     paging::pre_init(boot_info);
 
     println!("Starting kernel...");
@@ -39,7 +37,7 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     let fault_stack = paging::allocate_kernel_stack(paging::DEFAULT_KERNEL_STACK_PAGES)
         .expect("Failed to allocate fault stack");
     idle_thread_stack.switch_to_permanent(move |stack| {
-        init_post_paging(stack, fault_stack, tcb_offset, memory_map)
+        init_post_paging(stack, fault_stack, tcb_offset, memory_map, func);
     });
 }
 
@@ -48,6 +46,7 @@ unsafe fn init_post_paging(
     fault_stack: paging::KernelStack,
     tcb_offset: usize,
     memory_map: Vec<MemoryRegion>,
+    func: impl FnOnce() -> ! + 'static,
 ) -> ! {
     println!(
         "Running on our own stack! {:?} tcb: {:#x}",
@@ -96,8 +95,7 @@ unsafe fn init_post_paging(
         allocator::free_space()
     );
 
-    todo!("This would be the idle loop");
-    //loop {}
+    func()
 }
 
 /// This function is called on panic.

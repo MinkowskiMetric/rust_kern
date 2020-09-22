@@ -34,6 +34,8 @@ pub mod physmem;
 pub mod serial;
 pub mod vga_buffer;
 
+#[cfg(test)]
+use bootloader::BootInfo;
 use core::panic::PanicInfo;
 
 #[global_allocator]
@@ -74,12 +76,28 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     loop {}
 }
 
+#[cfg(test)]
+fn idle_loop() -> ! {
+    todo!("BIG IDLE: This would be the idle loop")
+}
+
+#[cfg(test)]
+fn run_tests() -> ! {
+    test_main();
+    idle_loop();
+}
+
+/*#[no_mangle]
+#[cfg(not(test))]
+pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
+    init::kstart(boot_info, idle_loop)
+}*/
+
 /// Entry point for `cargo test`
 #[cfg(test)]
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
-    test_main();
-    loop {}
+pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
+    init::kstart(boot_info, run_tests)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
