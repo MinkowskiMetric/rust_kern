@@ -169,9 +169,10 @@ impl RegionManager {
 
                     Some(RegionType::Free) if this_page.entries[i].size() > required_size => {
                         // We might need a frame to extend the table. We allocate one now so that we know that
-                        // we don't have to worry about that failure mode later
+                        // we don't have to worry about that failure mode later. This has to be a kernel frame because we
+                        // depend on it already being mapped
                         let table_frame =
-                            physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+                            physmem::allocate_kernel_frame().ok_or(MemoryError::OutOfMemory)?;
 
                         let last_entry = RegionMapEntry {
                             base: this_page.entries[i].base + required_size,
@@ -298,7 +299,8 @@ impl RegionManager {
             let pages = (limit - base) / PAGE_SIZE as usize;
             for page in 0..pages {
                 let page_addr = base + (page * PAGE_SIZE as usize);
-                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+                // We can use user frames here since we're mapping them
+                let frame = physmem::allocate_user_frame().ok_or(MemoryError::OutOfMemory)?;
 
                 flusher.consume(page_table.map_to(
                     page_addr,

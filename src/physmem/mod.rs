@@ -1,151 +1,28 @@
-use crate::init_mutex::InitMutex;
-use bootloader::{bootinfo::MemoryRegionType, BootInfo};
-use bump::BumpAllocator;
+use bootloader::bootinfo::MemoryRegion;
 use core::fmt;
 
-mod bump;
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum MemoryAreaType {
-    Null = 0,
-    Usable = 1,
-    Reclaimable = 2,
-}
-
-#[repr(packed)]
-#[derive(Copy, Clone, Debug)]
-pub struct MemoryArea {
-    pub start: usize,
-    pub limit: usize,
-    pub mem_type: MemoryAreaType,
-}
+mod frame_database;
 
 pub const PAGE_SIZE: usize = 4096;
 
-pub fn page_align_down(addr: usize) -> usize {
+pub const fn page_align_down(addr: usize) -> usize {
     addr & !(PAGE_SIZE - 1)
 }
 
-pub fn page_align_up(addr: usize) -> usize {
+pub const fn page_align_up(addr: usize) -> usize {
     page_align_down(addr + PAGE_SIZE - 1)
 }
 
-const MAX_MEMORY_AREAS: usize = 64;
-
-static mut MEMORY_MAP: [MemoryArea; MAX_MEMORY_AREAS] = [MemoryArea {
-    start: 0,
-    limit: 0,
-    mem_type: MemoryAreaType::Null,
-}; MAX_MEMORY_AREAS];
-
-#[derive(Clone)]
-pub struct MemoryMapIterator {
-    match_type: MemoryAreaType,
-    next_pos: usize,
+pub fn early_init<'a>(memory_map: impl IntoIterator<Item = &'a MemoryRegion>) {
+    frame_database::early_init(memory_map);
 }
 
-impl MemoryMapIterator {
-    pub fn new(match_type: MemoryAreaType) -> Self {
-        Self {
-            match_type,
-            next_pos: 0,
-        }
-    }
+pub fn init_post_paging<'a>(memory_map: impl IntoIterator<Item = &'a MemoryRegion> + Clone) {
+    frame_database::init_post_paging(memory_map);
 }
 
-impl Iterator for MemoryMapIterator {
-    type Item = &'static MemoryArea;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.next_pos < MAX_MEMORY_AREAS
-            && unsafe { MEMORY_MAP[self.next_pos].mem_type } != self.match_type
-        {
-            self.next_pos += 1;
-        }
-
-        if self.next_pos >= MAX_MEMORY_AREAS {
-            None
-        } else {
-            let this_pos = self.next_pos;
-            self.next_pos += 1;
-            unsafe { Some(&MEMORY_MAP[this_pos]) }
-        }
-    }
-}
-
-struct LeakAllocator<SrcAllocator: FrameAllocator> {
-    src_allocator: SrcAllocator,
-}
-
-impl<SrcAllocator: FrameAllocator> LeakAllocator<SrcAllocator> {
-    pub fn new(src_allocator: SrcAllocator) -> Self {
-        Self { src_allocator }
-    }
-}
-
-impl<SrcAllocator: FrameAllocator> FrameAllocator for LeakAllocator<SrcAllocator> {
-    fn free_frames(&self) -> usize {
-        self.src_allocator.free_frames()
-    }
-
-    fn used_frames(&self) -> usize {
-        self.src_allocator.used_frames()
-    }
-
-    fn allocate_frame(&mut self) -> Option<Frame> {
-        self.src_allocator.allocate_frame()
-    }
-
-    fn deallocate_frame(&mut self, frame: Frame) {
-        // do nothing and leak the frame
-        use crate::println;
-        println!("LEAKING PAGE {:?}", frame);
-    }
-}
-
-static ALLOCATOR: InitMutex<LeakAllocator<BumpAllocator>> = InitMutex::new();
-
-pub unsafe fn init(boot_info: &BootInfo) {
-    let mut mem_position = 0;
-
-    // We make multiple passes over the memory map. We place the immediately usable memory on the memory map first
-    // then we put the stuff we can reclaim after
-    for memory_region in boot_info.memory_map.iter() {
-        if memory_region.region_type == MemoryRegionType::Usable {
-            if mem_position >= MAX_MEMORY_AREAS {
-                break;
-            }
-            MEMORY_MAP[mem_position] = MemoryArea {
-                start: memory_region.range.start_addr() as usize,
-                limit: memory_region.range.end_addr() as usize,
-                mem_type: MemoryAreaType::Usable,
-            };
-            mem_position += 1;
-        }
-    }
-
-    for memory_region in boot_info.memory_map.iter() {
-        if memory_region.region_type == MemoryRegionType::KernelStack
-            || memory_region.region_type == MemoryRegionType::PageTable
-            || memory_region.region_type == MemoryRegionType::Bootloader
-            || memory_region.region_type == MemoryRegionType::BootInfo
-            || memory_region.region_type == MemoryRegionType::Package
-        {
-            if mem_position >= MAX_MEMORY_AREAS {
-                break;
-            }
-            MEMORY_MAP[mem_position] = MemoryArea {
-                start: memory_region.range.start_addr() as usize,
-                limit: memory_region.range.end_addr() as usize,
-                mem_type: MemoryAreaType::Reclaimable,
-            };
-            mem_position += 1;
-        }
-    }
-
-    ALLOCATOR.init(LeakAllocator::new(BumpAllocator::new(
-        MemoryMapIterator::new(MemoryAreaType::Usable),
-    )));
+pub fn init_reclaim<'a>(memory_map: impl IntoIterator<Item = &'a MemoryRegion> + Clone) {
+    frame_database::init_reclaim(memory_map);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,6 +31,10 @@ pub struct Frame(usize);
 impl Frame {
     pub fn containing_address(addr: usize) -> Self {
         Self(page_align_down(addr) / PAGE_SIZE)
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self(index)
     }
 
     pub fn index(&self) -> usize {
@@ -172,25 +53,58 @@ impl fmt::Debug for Frame {
 }
 
 pub fn free_frames() -> usize {
-    ALLOCATOR.lock().free_frames()
+    frame_database::LOW_REGION.free_frames()
+        + frame_database::NORMAL_REGION.free_frames()
+        + frame_database::HIGH_REGION.free_frames()
 }
 
 pub fn used_frames() -> usize {
-    ALLOCATOR.lock().used_frames()
+    frame_database::LOW_REGION.used_frames()
+        + frame_database::NORMAL_REGION.used_frames()
+        + frame_database::HIGH_REGION.used_frames()
 }
 
-pub fn allocate_frame() -> Option<Frame> {
-    ALLOCATOR.lock().allocate_frame()
+pub fn allocate_kernel_frame() -> Option<Frame> {
+    // For kernel allocations we do not try the high region because it isn't mapped and delivers frames
+    // that are useless to the kernel
+    frame_database::NORMAL_REGION
+        .allocate_frame()
+        .or_else(|| frame_database::LOW_REGION.allocate_frame())
+}
+
+pub fn allocate_user_frame() -> Option<Frame> {
+    frame_database::HIGH_REGION
+        .allocate_frame()
+        .or_else(|| frame_database::NORMAL_REGION.allocate_frame())
+        .or_else(|| frame_database::LOW_REGION.allocate_frame())
 }
 
 pub fn deallocate_frame(frame: Frame) {
-    ALLOCATOR.lock().deallocate_frame(frame)
+    if frame_database::LOW_REGION.contains_frame(frame) {
+        frame_database::LOW_REGION.deallocate_frame(frame)
+    } else if frame_database::NORMAL_REGION.contains_frame(frame) {
+        frame_database::NORMAL_REGION.deallocate_frame(frame)
+    } else {
+        frame_database::HIGH_REGION.deallocate_frame(frame)
+    }
+}
+
+pub trait LockedFrameAllocator {
+    fn free_frames(&self) -> usize;
+    fn used_frames(&self) -> usize;
+
+    fn allocate_frame(&mut self) -> Option<Frame>;
+    fn deallocate_frame(&mut self, frame: Frame);
+
+    fn contains_frame(&self, frame: Frame) -> bool;
 }
 
 pub trait FrameAllocator {
     fn free_frames(&self) -> usize;
     fn used_frames(&self) -> usize;
 
-    fn allocate_frame(&mut self) -> Option<Frame>;
-    fn deallocate_frame(&mut self, frame: Frame);
+    fn allocate_frame(&self) -> Option<Frame>;
+    fn deallocate_frame(&self, frame: Frame);
+
+    fn contains_frame(&self, frame: Frame) -> bool;
 }

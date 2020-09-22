@@ -18,7 +18,7 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     gdt::init();
     idt::init();
 
-    physmem::init(boot_info);
+    physmem::early_init(boot_info.memory_map.iter());
 
     // Initialize the allocator before paging. The allocator uses a small internal buffer which
     // gives us enough working heap to allocate during paging initialization
@@ -29,6 +29,8 @@ pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
     let memory_map: Vec<_> = boot_info.memory_map.iter().cloned().collect();
 
     let tcb_offset = paging::init(0);
+
+    physmem::init_post_paging(memory_map.iter());
 
     // Once paging is up and running, we can allocate a new kernel stack
     // for what will become our idle thread
@@ -45,7 +47,7 @@ unsafe fn init_post_paging(
     idle_thread_stack: paging::KernelStack,
     fault_stack: paging::KernelStack,
     tcb_offset: usize,
-    _memory_map: Vec<MemoryRegion>,
+    memory_map: Vec<MemoryRegion>,
 ) -> ! {
     println!(
         "Running on our own stack! {:?} tcb: {:#x}",
@@ -53,6 +55,8 @@ unsafe fn init_post_paging(
     );
 
     gdt::init_post_paging(tcb_offset, &idle_thread_stack, &fault_stack);
+
+    physmem::init_reclaim(memory_map.iter());
 
     println!(
         "Before stress - heap size {} bytes - free size {} bytes",

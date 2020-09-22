@@ -21,6 +21,15 @@ impl<T> InitMutex<T> {
             guard: self.lock.lock(),
         }
     }
+
+    pub fn try_lock<'a>(&'a self) -> Option<InitMutexGuard<'a, T>> {
+        let guard = self.lock.lock();
+        if guard.is_some() {
+            Some(InitMutexGuard { guard })
+        } else {
+            None
+        }
+    }
 }
 
 pub struct InitMutexGuard<'a, T> {

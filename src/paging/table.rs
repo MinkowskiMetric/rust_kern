@@ -175,7 +175,7 @@ impl<L: 'static + HierarchyLevel> PageTable<L> {
                     .unwrap_or(false),
                 "Huge page not supported"
             );
-            let new_page_table = physmem::allocate_frame()
+            let new_page_table = physmem::allocate_kernel_frame()
                 .expect("Failed to allocate frame in boot_create_next_table");
             self[index] = RawPresentPte::from_frame_and_flags(
                 new_page_table,

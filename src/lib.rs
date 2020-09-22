@@ -10,6 +10,7 @@
 #![feature(custom_test_frameworks)]
 #![feature(maybe_uninit_extra)]
 #![feature(never_type)]
+#![feature(slice_fill)]
 #![feature(step_trait)]
 #![feature(step_trait_ext)]
 #![feature(thread_local)]

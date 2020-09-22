@@ -241,7 +241,7 @@ pub unsafe fn init(cpuid: usize) -> usize {
 
     // Allocate a new page table
     let init_page_table_phys =
-        physmem::allocate_frame().expect("cannot allocate early page directory");
+        physmem::allocate_kernel_frame().expect("cannot allocate early page directory");
     let init_page_table = &mut *phys_to_virt_mut(init_page_table_phys.physical_address());
 
     prepare_identity_mapping(init_page_table).expect("Failed to initialize identity mapping");
