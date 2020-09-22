@@ -336,7 +336,7 @@ impl HeapRegionList {
                 } else {
                     // We have to move the payload out of the region that it is held in before we drop it, otherwise we end up with
                     // the memory going away part way through the drop which is weird.
-                    core::mem::drop(removed_region_list.next.unwrap());
+                    core::mem::drop((removed_region_list.next.unwrap() as *mut HeapRegion).read());
                 }
             }
         });
@@ -490,11 +490,11 @@ impl PayloadRegionAlloc {
             Self::Buffer(buffer) => {
                 let start = buffer.as_ptr() as usize;
                 let limit = start + buffer.len();
-                addr >= start && size < (limit - addr)
+                addr >= start && size <= (limit - addr)
             }
 
             Self::Region(region) => {
-                addr >= region.start() && addr <= region.limit() && size < (region.limit() - addr)
+                addr >= region.start() && addr <= region.limit() && size <= (region.limit() - addr)
             }
         }
     }

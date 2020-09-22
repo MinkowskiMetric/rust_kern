@@ -9,14 +9,13 @@ pub use crate::physmem::{page_align_down, page_align_up, Frame, PAGE_SIZE};
 use table::{p1_index, p2_index, p3_index, p4_index};
 pub use table::{HierarchyLevel, PageTable, PageTableIndex, PageTableLevel, L1, L2, L3, L4};
 
-pub use heap_region::{allocate_region, Region};
+pub use heap_region::{allocate_kernel_stack, allocate_region, KernelStack, Region};
 pub use mapper::{Mapper, MapperFlush, MapperFlushAll};
-pub use stacks::{allocate_kernel_stack, KernelStack, DEFAULT_KERNEL_STACK_PAGES};
 
 mod heap_region;
+mod kernel_stack;
 mod mapper;
 mod page_entry;
-mod stacks;
 mod table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,18 +32,16 @@ pub type Result<T> = core::result::Result<T, MemoryError>;
 pub const FIRST_KERNEL_PML4: PageTableIndex = p4_index(0xffff_8000_0000_0000);
 pub const KERNEL_PML4: PageTableIndex = p4_index(0xffff_8000_0000_0000);
 pub const IDENTITY_MAP_PML4: PageTableIndex = p4_index(IDENTITY_MAP_REGION);
-pub const KERNEL_DATA_PML4: PageTableIndex = p4_index(KERNEL_STACKS_BASE);
+pub const KERNEL_DATA_PML4: PageTableIndex = p4_index(KERNEL_HEAP_BASE);
 
 // We're going to use a whole PML4 entry to identity map memory. For now we will only map the first 4GB
 pub const IDENTITY_MAP_REGION: usize = 0xffff_8080_0000_0000;
 
-// Allow 1GB of kernel address space for kernel stacks. We don't use all of it.
-pub const KERNEL_STACKS_BASE: usize = 0xffff_ff80_0000_0000;
-pub const KERNEL_STACKS_LIMIT: usize = 0xffff_ff80_4000_0000;
-
-// Allow 2GB for the kernel heap
-pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_4000_0000;
+// Allow 3GB of kernel address space for kernel heap
+pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_0000_0000;
 pub const KERNEL_HEAP_LIMIT: usize = 0xffff_ff80_c000_0000;
+
+pub const DEFAULT_KERNEL_STACK_PAGES: usize = 8;
 
 pub struct ActivePageTable<'a> {
     #[allow(dead_code)]
@@ -321,10 +318,11 @@ pub unsafe fn init(cpuid: usize, boot_info: &BootInfo) -> usize {
     // Switch to the page table
     controlregs::cr3_write(init_page_table_phys.physical_address() as u64);
 
-    // Initialize the stack and region manager
-    stacks::init(KERNEL_STACKS_BASE, KERNEL_STACKS_LIMIT)
-        .expect("Failed to initialize kernel stacks");
+    // Initialize the region manager
     heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT);
+
+    let s = allocate_kernel_stack(3);
+    core::mem::drop(s);
 
     initialize_tcb(cpuid).expect("Failed to initialize tcb for CPU")
 }

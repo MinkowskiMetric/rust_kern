@@ -1,5 +1,8 @@
 use super::page_entry::PresentPageFlags;
-use super::{lock_page_table, Frame, MapperFlushAll, MemoryError, Result, PAGE_SIZE};
+use super::{
+    lock_page_table, page_entry, ActivePageTable, Frame, MapperFlushAll, MemoryError, Result,
+    PAGE_SIZE,
+};
 use crate::init_mutex::InitMutex;
 use crate::physmem;
 
@@ -8,6 +11,7 @@ use crate::physmem;
 enum RegionType {
     Free,
     Heap,
+    KernelStack,
 }
 
 #[repr(C)]
@@ -125,7 +129,7 @@ impl RegionManager {
         }
     }
 
-    pub fn allocate_region(&mut self, pages: usize) -> Result<Region> {
+    pub fn allocate_region(&mut self, pages: usize, region_type: RegionType) -> Result<Region> {
         let required_size = pages * PAGE_SIZE as usize;
         let ret = Self::allocate_first_fit(&mut self.head_page, required_size, |entry| {
             debug_assert_eq!(
@@ -139,8 +143,8 @@ impl RegionManager {
                 "allocate_first_fit returned incorrect region type"
             );
 
-            Self::map_region(entry, RegionType::Heap)?;
-            Ok(RegionType::Heap)
+            Self::map_region(entry, region_type)?;
+            Ok(region_type)
         })
         .map(|region_info| Region { region_info });
         Self::print_entries(&self.head_page);
@@ -272,11 +276,45 @@ impl RegionManager {
 
         match region_type {
             RegionType::Heap => Self::map_nonpaged(region_entry.base, region_entry.limit)?,
+            RegionType::KernelStack => {
+                Self::map_kernel_stack(region_entry.base, region_entry.limit)?
+            }
 
             RegionType::Free => panic!("Cannot map free region"),
         }
 
         Ok(())
+    }
+
+    fn map_nonpaged_impl(
+        page_table: &mut ActivePageTable,
+        flusher: &mut MapperFlushAll,
+        base: usize,
+        limit: usize,
+        unmap_base: usize,
+        unmap_limit: usize,
+    ) -> Result<()> {
+        let allocate_result: Result<()> = try {
+            let pages = (limit - base) / PAGE_SIZE as usize;
+            for page in 0..pages {
+                let page_addr = base + (page * PAGE_SIZE as usize);
+                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
+
+                flusher.consume(page_table.map_to(
+                    page_addr,
+                    frame,
+                    PresentPageFlags::WRITABLE
+                        | PresentPageFlags::GLOBAL
+                        | PresentPageFlags::NO_EXECUTE,
+                )?);
+            }
+        };
+
+        if allocate_result.is_err() {
+            Self::unmap_nonpaged(unmap_base, unmap_limit);
+        }
+
+        allocate_result
     }
 
     fn map_nonpaged(base: usize, limit: usize) -> Result<()> {
@@ -295,29 +333,46 @@ impl RegionManager {
         let mut page_table = unsafe { lock_page_table() };
         let mut flusher = MapperFlushAll::new();
 
-        let allocate_result: Result<()> = try {
-            let pages = (limit - base) / PAGE_SIZE as usize;
-            for page in 0..pages {
-                let page_addr = base + (page * PAGE_SIZE as usize);
-                let frame = physmem::allocate_frame().ok_or(MemoryError::OutOfMemory)?;
-
-                flusher.consume(page_table.map_to(
-                    page_addr,
-                    frame,
-                    PresentPageFlags::WRITABLE
-                        | PresentPageFlags::GLOBAL
-                        | PresentPageFlags::NO_EXECUTE,
-                )?);
-            }
-        };
+        let result =
+            Self::map_nonpaged_impl(&mut page_table, &mut flusher, base, limit, base, limit);
 
         flusher.flush(&mut page_table);
 
-        if allocate_result.is_err() {
-            Self::unmap_nonpaged(base, limit);
-        }
+        result
+    }
 
-        allocate_result
+    fn map_kernel_stack(base: usize, limit: usize) -> Result<()> {
+        debug_assert!(limit > base + PAGE_SIZE, "Invalid range");
+        debug_assert_eq!(
+            base,
+            align_up(base, PAGE_SIZE as usize),
+            "base address is not page aligned"
+        );
+        debug_assert_eq!(
+            limit,
+            align_down(limit, PAGE_SIZE as usize),
+            "limit address is not page aligned"
+        );
+
+        let mut page_table = unsafe { lock_page_table() };
+        let mut flusher = MapperFlushAll::new();
+
+        let result = try {
+            flusher.consume(
+                page_table.set_not_present(base, page_entry::KernelStackGuardPagePte::new())?,
+            );
+            Self::map_nonpaged_impl(
+                &mut page_table,
+                &mut flusher,
+                base + PAGE_SIZE,
+                limit,
+                base,
+                limit,
+            )?;
+        };
+
+        flusher.flush(&mut page_table);
+        result
     }
 
     pub fn deallocate_region(&mut self, region_info: &RegionInfo) {
@@ -486,7 +541,9 @@ impl RegionManager {
         );
 
         match region_entry.region_type.unwrap() {
-            RegionType::Heap => Self::unmap_nonpaged(region_entry.base, region_entry.limit),
+            RegionType::Heap | RegionType::KernelStack => {
+                Self::unmap_nonpaged(region_entry.base, region_entry.limit)
+            }
 
             RegionType::Free => panic!("Cannot unmap free region"),
         }
@@ -584,10 +641,21 @@ impl Drop for Region {
     }
 }
 
+pub use super::kernel_stack::KernelStack;
+
 pub unsafe fn init(base: usize, limit: usize) {
     REGION_MANAGER.init(RegionManager::new(base, limit));
 }
 
 pub fn allocate_region(pages: usize) -> Result<Region> {
-    REGION_MANAGER.lock().allocate_region(pages)
+    REGION_MANAGER
+        .lock()
+        .allocate_region(pages, RegionType::Heap)
+}
+
+pub fn allocate_kernel_stack(pages: usize) -> Result<KernelStack> {
+    REGION_MANAGER
+        .lock()
+        .allocate_region(pages, RegionType::KernelStack)
+        .map(|region| KernelStack::new(region))
 }

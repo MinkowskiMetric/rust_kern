@@ -121,23 +121,16 @@ impl Mapper {
     }
 
     pub fn unmap_and_free(&mut self, page: usize) -> MapperFlush {
-        self.unmap_and_free_and_replace(page, RawNotPresentPte::unused())
-    }
+        let pte = self.get_pte_mut_for_address(page);
 
-    pub fn unmap_and_free_and_replace(
-        &mut self,
-        page: usize,
-        new_pte: impl Into<RawNotPresentPte>,
-    ) -> MapperFlush {
-        // We can improve this - particularly we can avoid all of the flushing
-        // and not create page tables. Also, we should be able to delete page tables if they're no longer needed
-        let pte = self
-            .get_pte_mut_for_address(page)
-            .filter(|pte| pte.is_present())
-            .expect("Unmapping page which is not mapped");
+        if let Some(pte) = pte {
+            if let Ok(present_pte) = pte.present() {
+                physmem::deallocate_frame(present_pte.frame());
+            }
 
-        physmem::deallocate_frame(pte.present().unwrap().frame());
-        *pte = new_pte.into().into();
+            *pte = RawNotPresentPte::unused().into();
+        }
+
         MapperFlush::new(page)
     }
 
