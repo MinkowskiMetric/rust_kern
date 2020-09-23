@@ -8,6 +8,7 @@
 #![feature(const_in_array_repeat_expressions)]
 #![feature(const_panic)]
 #![feature(custom_test_frameworks)]
+#![feature(global_asm)]
 #![feature(maybe_uninit_extra)]
 #![feature(never_type)]
 #![feature(slice_fill)]
@@ -24,10 +25,13 @@ extern crate rlibc;
 extern crate alloc;
 
 pub mod allocator;
+pub mod devices;
 pub mod gdt;
 pub mod idt;
 pub mod init;
 pub mod init_mutex;
+#[macro_use]
+pub mod interrupts;
 pub mod mm;
 pub mod paging;
 pub mod physmem;
@@ -78,6 +82,10 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 fn idle_loop() -> ! {
+    unsafe {
+        *(0xdeadbeef as *mut u64) = 42;
+    };
+
     todo!("BIG IDLE: This would be the idle loop")
 }
 

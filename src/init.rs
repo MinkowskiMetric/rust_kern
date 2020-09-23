@@ -1,4 +1,5 @@
 use crate::allocator;
+use crate::devices;
 use crate::gdt;
 use crate::idt;
 use crate::paging;
@@ -14,7 +15,7 @@ pub unsafe fn kstart(boot_info: &'static BootInfo, func: impl FnOnce() -> ! + 's
     println!("Starting kernel...");
 
     gdt::init();
-    idt::init();
+    idt::early_init();
 
     physmem::early_init(boot_info.memory_map.iter());
 
@@ -54,46 +55,13 @@ unsafe fn init_post_paging(
     );
 
     gdt::init_post_paging(tcb_offset, &idle_thread_stack, &fault_stack);
+    idt::init(true);
 
     physmem::init_reclaim(memory_map.iter());
 
-    println!(
-        "Before stress - heap size {} bytes - free size {} bytes",
-        allocator::allocated_space(),
-        allocator::free_space()
-    );
-    // Stress the heap a bit
-    use alloc::vec;
-    let mut a = vec![box 17; 1024];
-    for i in 0..3 {
-        println!(
-            "Iteration {} - heap size {} bytes - free size {} bytes",
-            i,
-            allocator::allocated_space(),
-            allocator::free_space()
-        );
-        let b: Vec<_> = a.iter().cloned().collect();
-        a.extend(b);
-    }
-
-    println!(
-        "Before decimate - heap size {} bytes - free size {} bytes",
-        allocator::allocated_space(),
-        allocator::free_space()
-    );
-    a = a.iter().step_by(2).cloned().collect();
-    println!(
-        "After decimate - heap size {} bytes - free size {} bytes",
-        allocator::allocated_space(),
-        allocator::free_space()
-    );
-
-    core::mem::drop(a);
-    println!(
-        "After drop - heap size {} bytes - free size {} bytes",
-        allocator::allocated_space(),
-        allocator::free_space()
-    );
+    // At this point, memory is fully working and in our control. The next thing to do is to bring up
+    // the basic hardware
+    devices::init_bsp();
 
     func()
 }

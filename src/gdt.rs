@@ -42,6 +42,25 @@ impl GdtEntry {
     }
 }
 
+pub fn tss_entries(tss: &TaskStateSegment) -> (GdtEntry, GdtEntry) {
+    let tss_ptr = tss as *const _ as u64;
+    let tss_size = mem::size_of::<TaskStateSegment>() as u32;
+
+    let tss_ptr_0_32 = tss_ptr as u32;
+    let tss_ptr_32_48 = (tss_ptr >> 32) as u16;
+    let tss_ptr_48_64 = (tss_ptr >> 48) as u16;
+
+    let low = GdtEntry::new(
+        tss_ptr_0_32,
+        tss_size,
+        GDT_A_PRESENT | GDT_A_RING_3 | GDT_A_TSS_AVAIL,
+        0,
+    );
+    let high = GdtEntry::new(tss_ptr_48_64 as u32, tss_ptr_32_48 as u32, 0, 0);
+
+    (low, high)
+}
+
 pub const GDT_NULL: usize = 0;
 pub const GDT_KERNEL_CODE: usize = 1;
 pub const GDT_KERNEL_DATA: usize = 2;
@@ -208,8 +227,9 @@ pub unsafe fn init_post_paging(
     GDTR.base = GDT.as_ptr() as *const SegmentDescriptor;
 
     // We can now access our TSS, which is a thread local
-    GDT[GDT_TSS].set_offset(&TSS as *const _ as u32);
-    GDT[GDT_TSS].set_limit(mem::size_of::<TaskStateSegment>() as u32);
+    let (tss_low, tss_high) = tss_entries(&TSS);
+    GDT[GDT_TSS] = tss_low;
+    GDT[GDT_TSS_HIGH] = tss_high;
 
     set_tss_stack(init_stack);
     TSS.ist[0] = fault_stack.stack_top() as u64;
@@ -223,6 +243,9 @@ pub unsafe fn init_post_paging(
     segmentation::load_fs(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
     segmentation::load_gs(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
     segmentation::load_ss(SegmentSelector::new(GDT_KERNEL_DATA as u16, Ring::Ring0));
+
+    // We reloaded FS so we need to reload the fs base register
+    wrmsr(IA32_FS_BASE, tcb_offset as u64);
 
     // Set the TSS
     task::load_tr(SegmentSelector::new(GDT_TSS as u16, Ring::Ring0));

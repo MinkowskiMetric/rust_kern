@@ -1,4 +1,7 @@
-use super::{align_up, free_list::{AlignedLayout, FreeList}};
+use super::{
+    align_up,
+    free_list::{AlignedLayout, FreeList},
+};
 use crate::paging::{allocate_region, Region, PAGE_SIZE};
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
@@ -32,7 +35,10 @@ impl HeapRegionList {
         })
     }
 
-    unsafe fn do_allocate(mut prev_region: &mut HeapRegion, layout: AlignedLayout) -> Option<NonNull<u8>> {
+    unsafe fn do_allocate(
+        mut prev_region: &mut HeapRegion,
+        layout: AlignedLayout,
+    ) -> Option<NonNull<u8>> {
         loop {
             let allocation = prev_region
                 .next

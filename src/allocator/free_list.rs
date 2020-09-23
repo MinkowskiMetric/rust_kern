@@ -70,7 +70,9 @@ impl FreeList {
             Self::min_alignment(),
         );
 
-        Layout::from_size_align(required_size, required_alignment).ok().map(|l| AlignedLayout(l))
+        Layout::from_size_align(required_size, required_alignment)
+            .ok()
+            .map(|l| AlignedLayout(l))
     }
 
     pub unsafe fn new(start: usize, limit: usize) -> Self {
@@ -316,27 +318,32 @@ mod test {
 
     impl<'a> Drop for TestFreeList<'a> {
         fn drop(&mut self) {
-            unsafe { alloc::alloc::dealloc(self.storage.as_mut_ptr(), self.storage_layout.into()); }
+            unsafe {
+                alloc::alloc::dealloc(self.storage.as_mut_ptr(), self.storage_layout.into());
+            }
         }
     }
-
 
     fn make_free_list<'a>(size: usize, align: usize) -> TestFreeList<'a> {
         // Overallocate the storage so that we can make sure that align is met, but no higher alignments are. This is because the
         // free list is smart enough to look at the actual alignment of the memory, not just the minimum alignment
-        let storage_layout = Layout::from_size_align(size + align, align).ok().and_then(|layout| FreeList::align_layout(layout)).expect("Invalid layout");
+        let storage_layout = Layout::from_size_align(size + align, align)
+            .ok()
+            .and_then(|layout| FreeList::align_layout(layout))
+            .expect("Invalid layout");
         let ptr = unsafe { alloc::alloc::alloc(*storage_layout.layout()) };
         assert_ne!(ptr, core::ptr::null_mut());
         let storage = unsafe { alloc::slice::from_raw_parts_mut(ptr, storage_layout.size()) };
-        let aligned_storage = if storage.as_mut_ptr() as usize & ((2 * storage_layout.align()) - 1) == 0 {
-            storage.as_mut_ptr() as usize + storage_layout.align()
-        } else {
-            storage.as_mut_ptr() as usize
-        };
+        let aligned_storage =
+            if storage.as_mut_ptr() as usize & ((2 * storage_layout.align()) - 1) == 0 {
+                storage.as_mut_ptr() as usize + storage_layout.align()
+            } else {
+                storage.as_mut_ptr() as usize
+            };
 
         // Only tell the free list about the size we were actually asked for
         let free_list = unsafe { FreeList::new(aligned_storage, aligned_storage + size) };
-        
+
         TestFreeList {
             storage_layout,
             storage,
@@ -383,7 +390,10 @@ mod test {
             // Do an oversized allocation at the good alignment
             let layout = Layout::from_size_align(FreeList::min_alloc_size() + 1, align).unwrap();
             let layout = FreeList::align_layout(layout).unwrap();
-            assert_eq!(layout.size(), FreeList::min_alloc_size() + FreeList::min_alignment());
+            assert_eq!(
+                layout.size(),
+                FreeList::min_alloc_size() + FreeList::min_alignment()
+            );
             assert_eq!(layout.align(), FreeList::min_alignment());
 
             let allocation = t.free_list.allocate(layout);
