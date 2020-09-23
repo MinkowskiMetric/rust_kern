@@ -22,6 +22,30 @@ pub(super) struct FreeList {
     free_space: usize,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AlignedLayout(Layout);
+
+impl From<AlignedLayout> for Layout {
+    fn from(al: AlignedLayout) -> Self {
+        al.0
+    }
+}
+
+impl AlignedLayout {
+    pub fn layout(&self) -> &Layout {
+        &self.0
+    }
+
+    pub fn align(&self) -> usize {
+        self.layout().align()
+    }
+
+    pub fn size(&self) -> usize {
+        self.layout().size()
+    }
+}
+
 impl FreeList {
     pub const fn min_alignment() -> usize {
         align_of::<FreeNode>()
@@ -29,6 +53,24 @@ impl FreeList {
 
     pub const fn min_alloc_size() -> usize {
         size_of::<FreeNode>()
+    }
+
+    pub fn align_layout(layout: Layout) -> Option<AlignedLayout> {
+        // Fixing up the layout in here is useful because we do it before allocation and deallocation,
+        // which can simplify things. It makes life a lot easier if the minimal alignment is the same
+        // as our free node, and that the size makes sure the end of the allocation is aligned. We also
+        // avoid allocating anything smaller than our free node,
+        let required_alignment = layout.align();
+        let required_alignment = required_alignment.max(Self::min_alignment());
+        assert!(required_alignment >= Self::min_alignment());
+
+        let required_size = layout.size();
+        let required_size = align_up(
+            required_size.max(Self::min_alloc_size()),
+            Self::min_alignment(),
+        );
+
+        Layout::from_size_align(required_size, required_alignment).ok().map(|l| AlignedLayout(l))
     }
 
     pub unsafe fn new(start: usize, limit: usize) -> Self {
@@ -56,7 +98,7 @@ impl FreeList {
         }
     }
 
-    pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    pub fn allocate(&mut self, layout: AlignedLayout) -> Option<NonNull<u8>> {
         Self::tail_allocate(&mut self.head, layout).map(|allocation| {
             if let Some(front_padding) = allocation.front_padding {
                 Self::deallocate_from_hole_info(&mut self.head, front_padding);
@@ -72,7 +114,7 @@ impl FreeList {
         })
     }
 
-    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: AlignedLayout) {
         Self::deallocate_from_hole_info(
             &mut self.head,
             HoleInfo {
@@ -92,7 +134,21 @@ impl FreeList {
         self.allocated_space
     }
 
-    fn tail_allocate(mut prev_node: &mut FreeNode, layout: Layout) -> Option<Allocation> {
+    #[cfg(test)]
+    pub fn node_count(&self) -> usize {
+        let mut prev_node = &self.head;
+        let mut count = 0;
+        loop {
+            if let Some(next_node) = prev_node.next.as_ref() {
+                prev_node = next_node;
+                count += 1;
+            } else {
+                return count;
+            }
+        }
+    }
+
+    fn tail_allocate(mut prev_node: &mut FreeNode, layout: AlignedLayout) -> Option<Allocation> {
         loop {
             let allocation = prev_node
                 .next
@@ -112,7 +168,7 @@ impl FreeList {
         }
     }
 
-    fn allocate_from_hole_info(hole: HoleInfo, layout: Layout) -> Option<Allocation> {
+    fn allocate_from_hole_info(hole: HoleInfo, layout: AlignedLayout) -> Option<Allocation> {
         let available_size = hole.size;
         let required_size = layout.size();
         let required_alignment = layout.align();
@@ -251,28 +307,127 @@ impl FreeNode {
 mod test {
     use super::*;
 
-    fn aligned_slice<'a>(align: usize, size: usize) -> &'a mut [u8] {
-        unsafe {
-            let ptr = alloc::alloc::alloc(Layout::from_size_align(size, align).unwrap());
-            alloc::slice::from_raw_parts_mut(ptr, size)
+    struct TestFreeList<'a> {
+        storage_layout: AlignedLayout,
+        storage: &'a mut [u8],
+        aligned_storage: usize,
+        free_list: FreeList,
+    }
+
+    impl<'a> Drop for TestFreeList<'a> {
+        fn drop(&mut self) {
+            unsafe { alloc::alloc::dealloc(self.storage.as_mut_ptr(), self.storage_layout.into()); }
         }
     }
 
-    fn manufacture_free_list<'a>(storage: &'a mut [u8]) -> FreeList {
-        unsafe {
-            FreeList::new(
-                storage.as_ptr() as usize,
-                storage.as_ptr() as usize + storage.len(),
-            )
+
+    fn make_free_list<'a>(size: usize, align: usize) -> TestFreeList<'a> {
+        // Overallocate the storage so that we can make sure that align is met, but no higher alignments are. This is because the
+        // free list is smart enough to look at the actual alignment of the memory, not just the minimum alignment
+        let storage_layout = Layout::from_size_align(size + align, align).ok().and_then(|layout| FreeList::align_layout(layout)).expect("Invalid layout");
+        let ptr = unsafe { alloc::alloc::alloc(*storage_layout.layout()) };
+        assert_ne!(ptr, core::ptr::null_mut());
+        let storage = unsafe { alloc::slice::from_raw_parts_mut(ptr, storage_layout.size()) };
+        let aligned_storage = if storage.as_mut_ptr() as usize & ((2 * storage_layout.align()) - 1) == 0 {
+            storage.as_mut_ptr() as usize + storage_layout.align()
+        } else {
+            storage.as_mut_ptr() as usize
+        };
+
+        // Only tell the free list about the size we were actually asked for
+        let free_list = unsafe { FreeList::new(aligned_storage, aligned_storage + size) };
+        
+        TestFreeList {
+            storage_layout,
+            storage,
+            aligned_storage,
+            free_list,
         }
     }
 
     #[test_case]
     fn empty_free_list() {
-        let aligned_slice = aligned_slice(FreeList::min_alignment(), FreeList::min_alloc_size());
-        let free_list = manufacture_free_list(aligned_slice);
+        let t = make_free_list(FreeList::min_alloc_size(), FreeList::min_alignment());
 
-        // Verify that the free space is all used
-        assert_eq!(free_list.free_space(), FreeList::min_alloc_size());
+        // Verify that the free space is all available
+        assert_eq!(t.free_list.free_space(), FreeList::min_alloc_size());
+        assert_eq!(t.free_list.allocated_space(), 0);
+        assert_eq!(t.free_list.node_count(), 1);
+    }
+
+    #[test_case]
+    fn small_allocations() {
+        let mut t = make_free_list(FreeList::min_alloc_size(), FreeList::min_alignment());
+
+        let mut align = 1;
+        while align <= FreeList::min_alignment() {
+            for size in 0..=FreeList::min_alloc_size() {
+                let layout = Layout::from_size_align(size, align).unwrap();
+                let layout = FreeList::align_layout(layout).unwrap();
+                assert_eq!(layout.size(), FreeList::min_alloc_size());
+                assert_eq!(layout.align(), FreeList::min_alignment());
+
+                let allocation = t.free_list.allocate(layout);
+                assert!(allocation.is_some());
+                assert_eq!(allocation.unwrap().as_ptr() as usize, t.aligned_storage);
+                assert_eq!(t.free_list.free_space(), 0);
+                assert_eq!(t.free_list.allocated_space(), FreeList::min_alloc_size());
+                assert_eq!(t.free_list.node_count(), 0);
+
+                t.free_list.deallocate(allocation.unwrap(), layout);
+                assert_eq!(t.free_list.free_space(), FreeList::min_alloc_size());
+                assert_eq!(t.free_list.allocated_space(), 0);
+                assert_eq!(t.free_list.node_count(), 1);
+            }
+
+            // Do an oversized allocation at the good alignment
+            let layout = Layout::from_size_align(FreeList::min_alloc_size() + 1, align).unwrap();
+            let layout = FreeList::align_layout(layout).unwrap();
+            assert_eq!(layout.size(), FreeList::min_alloc_size() + FreeList::min_alignment());
+            assert_eq!(layout.align(), FreeList::min_alignment());
+
+            let allocation = t.free_list.allocate(layout);
+            assert!(allocation.is_none());
+
+            align *= 2;
+        }
+
+        // Do an overaligned allocation at a good size.
+        let layout = Layout::from_size_align(1, FreeList::min_alignment() * 2).unwrap();
+        let layout = FreeList::align_layout(layout).unwrap();
+        assert_eq!(layout.size(), FreeList::min_alloc_size());
+        assert_eq!(layout.align(), FreeList::min_alignment() * 2);
+
+        let allocation = t.free_list.allocate(layout);
+        assert!(allocation.is_none());
+    }
+
+    #[test_case]
+    fn test_overalignment() {
+        // Allocate a big free list so we have room to do bigger alignments up to 8K
+        let mut t = make_free_list(16384, FreeList::min_alignment());
+
+        let mut align = FreeList::min_alignment() * 2;
+        while align <= 8192 {
+            let layout = Layout::from_size_align(1, align).unwrap();
+            let layout = FreeList::align_layout(layout).unwrap();
+            assert_eq!(layout.size(), FreeList::min_alloc_size());
+            assert_eq!(layout.align(), align);
+
+            let allocation = t.free_list.allocate(layout);
+            assert!(allocation.is_some());
+            assert_eq!(allocation.unwrap().as_ptr() as usize & (align - 1), 0);
+            assert_eq!(t.free_list.free_space(), 16384 - FreeList::min_alloc_size());
+            assert_eq!(t.free_list.allocated_space(), FreeList::min_alloc_size());
+            // There should be two free nodes - one before and one after the allocation
+            assert_eq!(t.free_list.node_count(), 2);
+
+            t.free_list.deallocate(allocation.unwrap(), layout);
+            assert_eq!(t.free_list.free_space(), 16384);
+            assert_eq!(t.free_list.allocated_space(), 0);
+            assert_eq!(t.free_list.node_count(), 1);
+
+            align *= 2;
+        }
     }
 }

@@ -1,4 +1,4 @@
-use super::{align_up, free_list::FreeList};
+use super::{align_up, free_list::{AlignedLayout, FreeList}};
 use crate::paging::{allocate_region, Region, PAGE_SIZE};
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
@@ -25,32 +25,14 @@ impl HeapRegionList {
         }
     }
 
-    fn align_layout(layout: Layout) -> Option<Layout> {
-        // Fixing up the layout in here is useful because we do it before allocation and deallocation,
-        // which can simplify things. It makes life a lot easier if the minimal alignment is the same
-        // as our free node, and that the size makes sure the end of the allocation is aligned. We also
-        // avoid allocating anything smaller than our free node,
-        let required_alignment = layout.align();
-        let required_alignment = required_alignment.max(FreeList::min_alignment());
-        assert!(required_alignment >= FreeList::min_alignment());
-
-        let required_size = layout.size();
-        let required_size = align_up(
-            required_size.max(FreeList::min_alloc_size()),
-            FreeList::min_alignment(),
-        );
-
-        Layout::from_size_align(required_size, required_alignment).ok()
-    }
-
     pub unsafe fn alloc(&mut self, original_layout: Layout) -> Option<NonNull<u8>> {
-        Self::align_layout(original_layout).and_then(|aligned_layout| {
+        FreeList::align_layout(original_layout).and_then(|aligned_layout| {
             Self::do_allocate(&mut self.head, aligned_layout)
                 .or_else(|| self.expand_and_allocate(aligned_layout))
         })
     }
 
-    unsafe fn do_allocate(mut prev_region: &mut HeapRegion, layout: Layout) -> Option<NonNull<u8>> {
+    unsafe fn do_allocate(mut prev_region: &mut HeapRegion, layout: AlignedLayout) -> Option<NonNull<u8>> {
         loop {
             let allocation = prev_region
                 .next
@@ -68,7 +50,7 @@ impl HeapRegionList {
     }
 
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, original_layout: Layout) {
-        Self::align_layout(original_layout).map(|aligned_layout| {
+        FreeList::align_layout(original_layout).map(|aligned_layout| {
             if let Some(mut removed_region_list) =
                 Self::do_deallocate(&mut self.head, ptr, aligned_layout)
             {
@@ -98,7 +80,7 @@ impl HeapRegionList {
     unsafe fn do_deallocate(
         mut prev_region: &mut HeapRegion,
         ptr: NonNull<u8>,
-        layout: Layout,
+        layout: AlignedLayout,
     ) -> Option<HeapRegion> {
         loop {
             let deallocate_result = prev_region
@@ -159,7 +141,7 @@ impl HeapRegionList {
         }
     }
 
-    unsafe fn expand_and_allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    unsafe fn expand_and_allocate(&mut self, layout: AlignedLayout) -> Option<NonNull<u8>> {
         // The smallest possible region that this could fit in is the size of a region
         // header, plus whatever padding needed to get to alignment, plus the size of the
         // allocation, so let's work that out.
@@ -260,11 +242,11 @@ struct HeapRegionPayload {
 }
 
 impl HeapRegionPayload {
-    pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    pub fn allocate(&mut self, layout: AlignedLayout) -> Option<NonNull<u8>> {
         self.free_list.allocate(layout)
     }
 
-    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Option<()> {
+    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: AlignedLayout) -> Option<()> {
         if self.contains(ptr, layout.size()) {
             self.free_list.deallocate(ptr, layout);
             Some(())
@@ -296,13 +278,13 @@ struct HeapRegion {
 }
 
 impl HeapRegion {
-    pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    pub fn allocate(&mut self, layout: AlignedLayout) -> Option<NonNull<u8>> {
         self.payload
             .as_mut()
             .and_then(|payload| payload.allocate(layout))
     }
 
-    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Option<()> {
+    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: AlignedLayout) -> Option<()> {
         self.payload
             .as_mut()
             .and_then(|payload| payload.deallocate(ptr, layout))
