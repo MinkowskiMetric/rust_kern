@@ -7,6 +7,7 @@
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
 #![feature(const_panic)]
+#![feature(core_intrinsics)]
 #![feature(custom_test_frameworks)]
 #![feature(global_asm)]
 #![feature(maybe_uninit_extra)]
@@ -16,6 +17,7 @@
 #![feature(step_trait_ext)]
 #![feature(thread_local)]
 #![feature(try_blocks)]
+#![feature(unsafe_cell_raw_get)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
@@ -24,14 +26,15 @@ extern crate rlibc;
 //#[macro_use]
 extern crate alloc;
 
+pub mod acpi;
 pub mod allocator;
 pub mod devices;
 pub mod gdt;
 pub mod idt;
 pub mod init;
 pub mod init_mutex;
-#[macro_use]
 pub mod interrupts;
+pub mod io_port;
 pub mod mm;
 pub mod paging;
 pub mod physmem;

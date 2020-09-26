@@ -5,13 +5,43 @@ use super::{
 };
 use crate::init_mutex::InitMutex;
 use crate::physmem;
+use bitflags::bitflags;
 
-#[repr(u8)]
+bitflags! {
+    pub struct PhysicalMappingFlags: u64 {
+        const UNCACHED = 1 << 0;
+        const READ_ONLY = 1 << 1;
+    }
+}
+
+impl From<PhysicalMappingFlags> for PresentPageFlags {
+    fn from(pmf: PhysicalMappingFlags) -> Self {
+        let mut ret = PresentPageFlags::GLOBAL | PresentPageFlags::NO_EXECUTE;
+
+        if !pmf.contains(PhysicalMappingFlags::READ_ONLY) {
+            ret |= PresentPageFlags::WRITABLE;
+        }
+
+        if pmf.contains(PhysicalMappingFlags::UNCACHED) {
+            ret |= PresentPageFlags::NO_CACHE;
+        }
+
+        ret
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalMapping {
+    physical_address: usize,
+    flags: PhysicalMappingFlags,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegionType {
     Free,
     Heap,
     KernelStack,
+    PhysicalMapping(PhysicalMapping),
 }
 
 #[repr(C)]
@@ -88,7 +118,7 @@ const fn align_up(addr: usize, align: usize) -> usize {
     align_down(addr + align - 1, align)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct RegionInfo {
     start_va: usize,
     limit_va: usize,
@@ -146,7 +176,7 @@ impl RegionManager {
             Self::map_region(entry, region_type)?;
             Ok(region_type)
         })
-        .map(|region_info| Region { region_info });
+        .map(|region_info| Region::new(region_info));
         Self::print_entries(&self.head_page);
         ret
     }
@@ -280,6 +310,9 @@ impl RegionManager {
             RegionType::KernelStack => {
                 Self::map_kernel_stack(region_entry.base, region_entry.limit)?
             }
+            RegionType::PhysicalMapping(physical_mapping) => {
+                Self::map_physical_memory(&physical_mapping, region_entry.base, region_entry.limit)?
+            }
 
             RegionType::Free => panic!("Cannot map free region"),
         }
@@ -313,7 +346,7 @@ impl RegionManager {
         };
 
         if allocate_result.is_err() {
-            Self::unmap_nonpaged(unmap_base, unmap_limit);
+            Self::unmap_nonpaged(unmap_base, unmap_limit, true);
         }
 
         allocate_result
@@ -371,6 +404,47 @@ impl RegionManager {
                 base,
                 limit,
             )?;
+        };
+
+        flusher.flush(&mut page_table);
+        result
+    }
+
+    fn map_physical_memory(
+        physical_mapping: &PhysicalMapping,
+        base: usize,
+        limit: usize,
+    ) -> Result<()> {
+        debug_assert!(limit > base, "Invalid range");
+        debug_assert_eq!(
+            base,
+            align_up(base, PAGE_SIZE as usize),
+            "base address is not page aligned"
+        );
+        debug_assert_eq!(
+            limit,
+            align_down(limit, PAGE_SIZE as usize),
+            "limit address is not page aligned"
+        );
+
+        let mut page_table = unsafe { lock_page_table() };
+        let mut flusher = MapperFlushAll::new();
+
+        let result = try {
+            let pages = (limit - base) / PAGE_SIZE as usize;
+            for page in 0..pages {
+                let page_addr = base + (page * PAGE_SIZE as usize);
+                // We can use user frames here since we're mapping them
+                let frame = Frame::containing_address(
+                    physical_mapping.physical_address + (page * PAGE_SIZE),
+                );
+
+                flusher.consume(page_table.map_to(
+                    page_addr,
+                    frame,
+                    physical_mapping.flags.into(),
+                )?);
+            }
         };
 
         flusher.flush(&mut page_table);
@@ -544,14 +618,17 @@ impl RegionManager {
 
         match region_entry.region_type.unwrap() {
             RegionType::Heap | RegionType::KernelStack => {
-                Self::unmap_nonpaged(region_entry.base, region_entry.limit)
+                Self::unmap_nonpaged(region_entry.base, region_entry.limit, true)
+            }
+            RegionType::PhysicalMapping(_) => {
+                Self::unmap_nonpaged(region_entry.base, region_entry.limit, false)
             }
 
             RegionType::Free => panic!("Cannot unmap free region"),
         }
     }
 
-    fn unmap_nonpaged(base: usize, limit: usize) {
+    fn unmap_nonpaged(base: usize, limit: usize, free_pages: bool) {
         debug_assert!(limit > base, "Invalid range");
         debug_assert_eq!(
             base,
@@ -571,7 +648,7 @@ impl RegionManager {
         for page in 0..pages {
             let page_addr = base + (page * PAGE_SIZE as usize);
 
-            flusher.consume(page_table.unmap_and_free(page_addr));
+            flusher.consume(page_table.unmap(page_addr, free_pages));
         }
 
         flusher.flush(&mut page_table);
@@ -608,32 +685,58 @@ impl RegionManager {
 
 static REGION_MANAGER: InitMutex<RegionManager> = InitMutex::new();
 
+#[derive(Debug)]
 pub struct Region {
     region_info: RegionInfo,
+    sub_region_offset: usize,
+    sub_region_length: usize,
 }
 
 impl Region {
+    fn new(region_info: RegionInfo) -> Self {
+        Self {
+            region_info,
+            sub_region_offset: 0,
+            sub_region_length: region_info.size(),
+        }
+    }
+
+    pub fn apply_offset(self, offset: usize, length: usize) -> Self {
+        let md = core::mem::ManuallyDrop::new(self);
+
+        assert!(offset + length <= md.size());
+        Self {
+            region_info: md.region_info,
+            sub_region_offset: md.sub_region_offset + offset,
+            sub_region_length: length,
+        }
+    }
+
     pub fn as_ptr<T>(&self) -> *const T {
         self.as_ptr_offset(0)
     }
 
     pub fn as_ptr_offset<T>(&self, offset: usize) -> *const T {
-        (self.region_info.start_va + offset) as *const T
+        (self.start() + offset) as *const T
     }
     pub fn as_mut_ptr<T>(&mut self) -> *mut T {
         self.as_mut_ptr_offset(0)
     }
 
     pub fn as_mut_ptr_offset<T>(&mut self, offset: usize) -> *mut T {
-        (self.region_info.start_va + offset) as *mut T
+        (self.start() + offset) as *mut T
     }
 
     pub fn start(&self) -> usize {
-        self.region_info.start_va
+        self.region_info.start_va + self.sub_region_offset
     }
 
     pub fn limit(&self) -> usize {
-        self.region_info.limit_va
+        self.start() + self.size()
+    }
+
+    pub fn size(&self) -> usize {
+        self.sub_region_length
     }
 }
 
@@ -660,4 +763,26 @@ pub fn allocate_kernel_stack(pages: usize) -> Result<KernelStack> {
         .lock()
         .allocate_region(pages, RegionType::KernelStack)
         .map(|region| KernelStack::new(region))
+}
+
+pub unsafe fn map_physical_memory(
+    physical_address: usize,
+    size: usize,
+    flags: PhysicalMappingFlags,
+) -> Result<Region> {
+    let aligned_start = align_down(physical_address, PAGE_SIZE);
+    let aligned_limit = align_up(physical_address + size, PAGE_SIZE);
+    let pages = (aligned_limit - aligned_start) / PAGE_SIZE;
+    let offset = physical_address - aligned_start;
+
+    REGION_MANAGER
+        .lock()
+        .allocate_region(
+            pages,
+            RegionType::PhysicalMapping(PhysicalMapping {
+                physical_address: aligned_start,
+                flags,
+            }),
+        )
+        .map(|region| region.apply_offset(offset, size))
 }

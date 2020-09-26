@@ -9,7 +9,11 @@ use bootloader::BootInfo;
 extern crate rust_kern;
 
 fn idle_loop() -> ! {
-    todo!("BIG IDLE: This would be the idle loop")
+    loop {
+        unsafe {
+            rust_kern::interrupts::enable_and_halt();
+        }
+    }
 }
 
 #[cfg(test)]

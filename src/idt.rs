@@ -1,4 +1,4 @@
-use crate::interrupts::exceptions;
+use crate::interrupts::{exceptions, irq};
 use bitflags::bitflags;
 use x86::dtables::{self, DescriptorTablePointer};
 use x86::segmentation::Descriptor as X86IdtEntry;
@@ -88,7 +88,7 @@ pub unsafe fn early_init() {
     dtables::lidt(&INIT_IDTR);
 }
 
-pub fn init(_is_bsp: bool) {
+pub fn init(is_bsp: bool) {
     let (idt, idtr) = unsafe {
         use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -143,6 +143,10 @@ pub fn init(_is_bsp: bool) {
     // 21 through 29 reserved
     idt.entries[30].set_func(exceptions::security);
     // 31 reserved
+
+    if is_bsp {
+        idt.entries[32].set_func(irq::timer);
+    }
 
     unsafe {
         dtables::lidt(idtr);

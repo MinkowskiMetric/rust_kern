@@ -229,8 +229,8 @@ macro_rules! interrupt {
             $crate::function!($name => {
                 // Backup all userspace registers to stack
                 "push rax\n",
-                push_scratch!(),
-                push_fs!(),
+                $crate::push_scratch!(),
+                $crate::push_fs!(),
 
                 // TODO: Map PTI
                 // $crate::arch::x86_64::pti::map();
@@ -242,8 +242,8 @@ macro_rules! interrupt {
                 // $crate::arch::x86_64::pti::unmap();
 
                 // Restore all userspace registers
-                pop_fs!(),
-                pop_scratch!(),
+                $crate::pop_fs!(),
+                $crate::pop_scratch!(),
 
                 "iretq\n",
             });

@@ -9,7 +9,10 @@ pub use crate::physmem::{page_align_down, page_align_up, Frame, PAGE_SIZE};
 use table::{p1_index, p2_index, p3_index, p4_index};
 pub use table::{HierarchyLevel, PageTable, PageTableIndex, PageTableLevel, L1, L2, L3, L4};
 
-pub use heap_region::{allocate_kernel_stack, allocate_region, KernelStack, Region};
+pub use heap_region::{
+    allocate_kernel_stack, allocate_region, map_physical_memory, KernelStack, PhysicalMappingFlags,
+    Region,
+};
 pub use mapper::{Mapper, MapperFlush, MapperFlushAll};
 
 mod heap_region;
@@ -41,7 +44,7 @@ pub const IDENTITY_MAP_REGION: usize = 0xffff_8080_0000_0000;
 pub const KERNEL_HEAP_BASE: usize = 0xffff_ff80_0000_0000;
 pub const KERNEL_HEAP_LIMIT: usize = 0xffff_ff80_c000_0000;
 
-pub const DEFAULT_KERNEL_STACK_PAGES: usize = 8;
+pub const DEFAULT_KERNEL_STACK_PAGES: usize = 32;
 
 pub struct ActivePageTable<'a> {
     #[allow(dead_code)]

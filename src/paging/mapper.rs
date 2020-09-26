@@ -120,12 +120,14 @@ impl Mapper {
         Ok(MapperFlush::new(page))
     }
 
-    pub fn unmap_and_free(&mut self, page: usize) -> MapperFlush {
+    pub fn unmap(&mut self, page: usize, free: bool) -> MapperFlush {
         let pte = self.get_pte_mut_for_address(page);
 
         if let Some(pte) = pte {
-            if let Ok(present_pte) = pte.present() {
-                physmem::deallocate_frame(present_pte.frame());
+            if free {
+                if let Ok(present_pte) = pte.present() {
+                    physmem::deallocate_frame(present_pte.frame());
+                }
             }
 
             *pte = RawNotPresentPte::unused().into();

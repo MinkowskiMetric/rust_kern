@@ -1,5 +1,7 @@
-mod pic;
+pub mod io_apic;
+pub mod local_apic;
 
-pub fn init_bsp() {
-    pic::init();
+pub unsafe fn init_bsp() {
+    local_apic::init_bsp();
+    io_apic::init();
 }

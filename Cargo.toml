@@ -19,6 +19,8 @@ x86_64 = "0.11.0"
 num-traits = { version = "0.2", default-features = false }
 num-derive = "0.3"
 paste = "1.0.1"
+acpi = "1.1.0"
+aml = "0.9.0"
 
 [dependencies.x86]
 version = "0.32.0"
@@ -29,7 +31,8 @@ default-features = false
 [profile.release]
 
 [package.metadata.bootimage]
-test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
+run-args = ["-smp", "cpus=2"]
+test-args = ["-smp", "cpus=2", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 30
 

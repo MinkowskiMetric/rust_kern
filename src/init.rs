@@ -1,3 +1,4 @@
+use crate::acpi;
 use crate::allocator;
 use crate::devices;
 use crate::gdt;
@@ -58,6 +59,8 @@ unsafe fn init_post_paging(
     idt::init(true);
 
     physmem::init_reclaim(memory_map.iter());
+
+    acpi::init_bsp();
 
     // At this point, memory is fully working and in our control. The next thing to do is to bring up
     // the basic hardware
