@@ -60,7 +60,9 @@ impl<'a> ActivePageTable<'a> {
 
     pub fn flush_all(&self) {
         unsafe {
+            use crate::ipi::{ipi, IpiKind, IpiTarget};
             tlb::flush_all();
+            ipi(IpiKind::Tlb, IpiTarget::Other);
         }
     }
 }

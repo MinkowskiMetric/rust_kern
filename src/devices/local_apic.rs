@@ -47,6 +47,10 @@ pub fn local_apic_access<'a>() -> &'a mut LocalApicAccess {
     unsafe { LOCAL_APIC_ACCESS.as_mut().unwrap() }
 }
 
+pub fn local_apic_access_safe<'a>() -> Option<&'a mut LocalApicAccess> {
+    unsafe { LOCAL_APIC_ACCESS.as_mut() }
+}
+
 fn disable_pic() {
     use crate::io_port::{Io, IoPort};
 

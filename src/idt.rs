@@ -1,4 +1,4 @@
-use crate::interrupts::{exceptions, irq};
+use crate::interrupts::{exceptions, ipi, irq};
 use bitflags::bitflags;
 use x86::dtables::{self, DescriptorTablePointer};
 use x86::segmentation::Descriptor as X86IdtEntry;
@@ -147,6 +147,10 @@ pub fn init(is_bsp: bool) {
     if is_bsp {
         idt.entries[32].set_func(irq::timer);
     }
+
+    idt.entries[0xf0].set_func(ipi::tlb);
+    idt.entries[0xfe].set_func(ipi::halt);
+    idt.entries[0xff].set_func(irq::spurious);
 
     unsafe {
         dtables::lidt(idtr);

@@ -35,6 +35,7 @@ pub mod init;
 pub mod init_mutex;
 pub mod interrupts;
 pub mod io_port;
+pub mod ipi;
 pub mod mm;
 pub mod paging;
 pub mod physmem;
@@ -97,12 +98,6 @@ fn run_tests() -> ! {
     test_main();
     idle_loop();
 }
-
-/*#[no_mangle]
-#[cfg(not(test))]
-pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
-    init::kstart(boot_info, idle_loop)
-}*/
 
 /// Entry point for `cargo test`
 #[cfg(test)]

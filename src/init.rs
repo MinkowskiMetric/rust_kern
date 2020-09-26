@@ -76,6 +76,7 @@ unsafe fn init_post_paging(
     // Before we go into the idle loop ourselves, kick the aps
     BSP_READY.store(true, Ordering::SeqCst);
 
+    println!("CPU 0 going idle");
     func()
 }
 
@@ -98,6 +99,7 @@ pub unsafe fn kstart_ap(cpu_id: usize, idle_thread_stack: paging::KernelStack) -
         crate::interrupts::pause();
     }
 
+    crate::println!("CPU {} going idle", cpu_id);
     idle_loop()
 }
 
@@ -114,7 +116,9 @@ pub fn idle_loop() -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("{}", info);
-    loop {}
+    use crate::ipi::{ipi, IpiKind, IpiTarget};
+    ipi(IpiKind::Halt, IpiTarget::Other);
+    crate::interrupts::disable_and_halt()
 }
 
 #[cfg(test)]
