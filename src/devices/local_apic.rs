@@ -1,6 +1,6 @@
 use crate::paging;
 
-struct LocalApicAccess {
+pub struct LocalApicAccess {
     mapping: paging::Region,
 }
 
@@ -19,18 +19,31 @@ impl LocalApicAccess {
         Self { mapping }
     }
 
-    /*pub unsafe fn read(&self, offset: u16) -> u32 {
+    pub unsafe fn read(&self, offset: u16) -> u32 {
         core::intrinsics::volatile_load(self.mapping.as_ptr_offset(offset.into()))
-    }*/
+    }
 
-    pub unsafe fn write(&mut self, offset: u16, value: u32) {
+    unsafe fn write(&mut self, offset: u16, value: u32) {
         core::intrinsics::volatile_store(self.mapping.as_mut_ptr_offset(offset.into()), value)
+    }
+
+    pub fn id(&self) -> u32 {
+        unsafe { self.read(0x20) }
+    }
+
+    pub fn set_icr(&mut self, value: u64) {
+        unsafe {
+            while self.read(0x300) & 1 << 12 == 1 << 12 {}
+            self.write(0x310, (value >> 32) as u32);
+            self.write(0x300, value as u32);
+            while self.read(0x300) & 1 << 12 == 1 << 12 {}
+        }
     }
 }
 
 static mut LOCAL_APIC_ACCESS: Option<LocalApicAccess> = None;
 
-fn local_apic_access<'a>() -> &'a mut LocalApicAccess {
+pub fn local_apic_access<'a>() -> &'a mut LocalApicAccess {
     unsafe { LOCAL_APIC_ACCESS.as_mut().unwrap() }
 }
 
@@ -77,6 +90,11 @@ pub unsafe fn init_bsp() {
     // the mechanics of accessing the local apic do not change between cores.
     LOCAL_APIC_ACCESS = Some(LocalApicAccess::new());
 
+    // Set the spurious interrupt register to 0xff and enable the local APIC
+    local_apic_access().write(0xf0, 0x1ff);
+}
+
+pub unsafe fn init_ap() {
     // Set the spurious interrupt register to 0xff and enable the local APIC
     local_apic_access().write(0xf0, 0x1ff);
 }

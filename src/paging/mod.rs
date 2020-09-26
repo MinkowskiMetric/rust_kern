@@ -14,6 +14,7 @@ pub use heap_region::{
     Region,
 };
 pub use mapper::{Mapper, MapperFlush, MapperFlushAll};
+pub use page_entry::PresentPageFlags;
 
 mod heap_region;
 mod kernel_stack;
@@ -317,6 +318,12 @@ pub unsafe fn init(cpuid: usize) -> usize {
     heap_region::init(KERNEL_HEAP_BASE, KERNEL_HEAP_LIMIT);
 
     initialize_tcb(cpuid).expect("Failed to initialize tcb for CPU")
+}
+
+pub unsafe fn init_ap(cpu_id: usize) -> usize {
+    // The only thing we need to do for an AP is to initialize its TCB
+    // memory
+    initialize_tcb(cpu_id).expect("Failed to initialize tcb for CPU")
 }
 
 unsafe fn initialize_tcb(_cpuid: usize) -> Result<usize> {

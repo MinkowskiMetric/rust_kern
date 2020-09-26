@@ -250,3 +250,9 @@ pub unsafe fn init_post_paging(
     // Set the TSS
     task::load_tr(SegmentSelector::new(GDT_TSS as u16, Ring::Ring0));
 }
+
+pub unsafe fn init_ap(tcb_offset: usize, init_stack: &KernelStack, fault_stack: &KernelStack) {
+    // Only one AP is initialized at a time, so we can do this
+    init();
+    init_post_paging(tcb_offset, init_stack, fault_stack);
+}

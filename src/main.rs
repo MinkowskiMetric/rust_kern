@@ -8,24 +8,21 @@ use bootloader::BootInfo;
 
 extern crate rust_kern;
 
-fn idle_loop() -> ! {
-    loop {
-        unsafe {
-            rust_kern::interrupts::enable_and_halt();
-        }
-    }
+#[cfg(not(test))]
+fn kmain() -> ! {
+    rust_kern::init::idle_loop()
 }
 
 #[cfg(test)]
 fn run_tests() -> ! {
     test_main();
-    idle_loop();
+    rust_kern::init::idle_loop()
 }
 
 #[no_mangle]
 #[cfg(not(test))]
 pub unsafe extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
-    rust_kern::init::kstart(boot_info, idle_loop)
+    rust_kern::init::kstart(boot_info, kmain)
 }
 
 /// Entry point for `cargo test`

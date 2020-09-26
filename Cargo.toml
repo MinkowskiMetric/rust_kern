@@ -31,8 +31,8 @@ default-features = false
 [profile.release]
 
 [package.metadata.bootimage]
-run-args = ["-smp", "cpus=2"]
-test-args = ["-smp", "cpus=2", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
+run-args = ["-smp", "cpus=4"]
+test-args = ["-smp", "cpus=4", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 30
 

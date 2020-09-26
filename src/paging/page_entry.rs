@@ -53,6 +53,12 @@ impl fmt::Debug for RawPte {
     }
 }
 
+impl From<RawPte> for u64 {
+    fn from(raw_pte: RawPte) -> Self {
+        raw_pte.0
+    }
+}
+
 bitflags! {
     pub struct PresentPageFlags: u64 {
         /// Controls whether writes to the mapped frames are allowed.

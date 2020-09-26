@@ -1,6 +1,7 @@
 use super::Region;
 use alloc::boxed::Box;
 
+#[derive(Debug)]
 pub struct KernelStack {
     region: Region,
 }

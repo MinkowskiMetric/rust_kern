@@ -36,20 +36,65 @@ fn lowest_one_bit(byte: u8) -> Option<usize> {
     None
 }
 
-fn filter_memory_map<'a>(
+struct FreeMemoryRegion {
+    base: usize,
+    limit: usize,
+}
+
+struct MemoryMapFilter<
+    'a,
+    Iter: Iterator<Item = &'a MemoryRegion>,
+    CheckFn: Fn(MemoryRegionType) -> bool,
+> {
+    start_frame_addr: usize,
+    limit_frame_addr: usize,
+    iter: Iter,
+    check_type: CheckFn,
+}
+
+impl<'a, Iter: Iterator<Item = &'a MemoryRegion>, CheckFn: Fn(MemoryRegionType) -> bool> Iterator
+    for MemoryMapFilter<'a, Iter, CheckFn>
+{
+    type Item = FreeMemoryRegion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(region) => {
+                    let base = (region.range.start_addr() as usize).max(self.start_frame_addr);
+                    let limit = (region.range.end_addr() as usize).min(self.limit_frame_addr);
+
+                    if limit > base && (self.check_type)(region.region_type) {
+                        return Some(FreeMemoryRegion { base, limit });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn filter_memory_map<
+    'a,
+    IntoIter: IntoIterator<Item = &'a MemoryRegion>,
+    CheckFn: Fn(MemoryRegionType) -> bool,
+>(
     start_frame: usize,
     limit_frame: usize,
-    memory_map: impl IntoIterator<Item = &'a MemoryRegion>,
-    check_type: impl Fn(MemoryRegionType) -> bool,
-) -> impl Iterator<Item = &'a MemoryRegion> {
-    let start_frame_addr = start_frame * PAGE_SIZE;
-    let limit_frame_addr = limit_frame * PAGE_SIZE;
+    memory_map: IntoIter,
+    check_type: CheckFn,
+) -> MemoryMapFilter<'a, IntoIter::IntoIter, CheckFn> {
+    const MINIMUM_ADDRESS: usize = 0x1_0000;
 
-    memory_map.into_iter().filter(move |region| {
-        (region.range.end_addr() as usize) > start_frame_addr
-            && (region.range.start_addr() as usize) < limit_frame_addr
-            && check_type(region.region_type)
-    })
+    let start_frame_addr = (start_frame * PAGE_SIZE).max(MINIMUM_ADDRESS);
+    let limit_frame_addr = (limit_frame * PAGE_SIZE).max(MINIMUM_ADDRESS);
+
+    MemoryMapFilter {
+        start_frame_addr,
+        limit_frame_addr,
+        iter: memory_map.into_iter(),
+        check_type,
+    }
 }
 
 fn usable(region_type: MemoryRegionType) -> bool {
@@ -75,7 +120,7 @@ fn find_available_limit_frame<'a>(
 ) -> usize {
     let mut available_limit_frame = start_frame;
     for region in filter_memory_map(start_frame, limit_frame, memory_map, usable_or_reclaimable) {
-        let region_limit_frame = (region.range.end_addr() as usize / PAGE_SIZE).min(limit_frame);
+        let region_limit_frame = (region.limit / PAGE_SIZE).min(limit_frame);
         available_limit_frame = available_limit_frame.max(region_limit_frame);
     }
     available_limit_frame
@@ -100,10 +145,8 @@ impl PageFrameRegion {
         bitmask.fill(0);
 
         for region in filter_memory_map(start_frame, limit_frame, memory_map, usable) {
-            let free_span_start_frame =
-                (region.range.start_addr() as usize / PAGE_SIZE).max(start_frame) - start_frame;
-            let free_span_end_frame =
-                (region.range.end_addr() as usize / PAGE_SIZE).min(limit_frame) - start_frame;
+            let free_span_start_frame = (region.base / PAGE_SIZE).max(start_frame) - start_frame;
+            let free_span_end_frame = (region.limit / PAGE_SIZE).min(limit_frame) - start_frame;
 
             for free_frame in free_span_start_frame..free_span_end_frame {
                 set_bit(bitmask, free_frame, true);
@@ -129,7 +172,7 @@ impl PageFrameRegion {
         // probably not work, but it is good enough for now
         let bitmask_frames =
             find_available_limit_frame(start_frame, limit_frame, memory_map.clone()) - start_frame;
-        let bitmask_bytes = bitmask_frames / 8;
+        let bitmask_bytes = (bitmask_frames + 7) / 8;
 
         let bitmask = vec![0; bitmask_bytes].into_boxed_slice();
         Self::new(
@@ -143,12 +186,10 @@ impl PageFrameRegion {
     pub fn reclaim<'a>(&mut self, memory_map: impl IntoIterator<Item = &'a MemoryRegion> + Clone) {
         for region in filter_memory_map(self.start_frame, self.limit_frame, memory_map, reclaimable)
         {
-            let free_span_start_frame = (region.range.start_addr() as usize / PAGE_SIZE)
-                .max(self.start_frame)
-                - self.start_frame;
-            let free_span_end_frame = (region.range.end_addr() as usize / PAGE_SIZE)
-                .min(self.limit_frame)
-                - self.start_frame;
+            let free_span_start_frame =
+                (region.base / PAGE_SIZE).max(self.start_frame) - self.start_frame;
+            let free_span_end_frame =
+                (region.limit / PAGE_SIZE).min(self.limit_frame) - self.start_frame;
 
             for free_frame in free_span_start_frame..free_span_end_frame {
                 assert!(
@@ -214,6 +255,8 @@ impl LockedFrameAllocator for PageFrameRegion {
 // I probably don't care about the ISA DMA controller, but I need to have some limit of
 // how much memory I want to statically initialize before paging is up and running, so 16MiB
 // seems like a good amount
+const LOW_REGION_BASE: usize = 64 * 1024; // Don't use the first 64KiB - it is useful to have it free
+const UNUSED_LOW_FRAMES: usize = LOW_REGION_BASE / PAGE_SIZE;
 const LOW_REGION_SIZE_LIMIT: usize = 16 * 1024 * 1024;
 const LOW_REGION_FRAMES: usize = LOW_REGION_SIZE_LIMIT / PAGE_SIZE;
 
@@ -242,7 +285,7 @@ pub fn early_init<'a, T: IntoIterator<Item = &'a MemoryRegion>>(memory_map: T) {
 
         // We need an unsafe here because we're using a mutable static, but it is safe because the init mutex
         // guarantees this function will only be called once
-        PageFrameRegion::new(0, LOW_REGION_FRAMES, memory_map, unsafe {
+        PageFrameRegion::new(UNUSED_LOW_FRAMES, LOW_REGION_FRAMES, memory_map, unsafe {
             &mut LOW_REGION_BITMASK
         })
     }
