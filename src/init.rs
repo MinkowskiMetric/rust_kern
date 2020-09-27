@@ -104,6 +104,7 @@ pub unsafe fn kstart_ap(cpu_id: usize, idle_thread_stack: paging::KernelStack) -
 }
 
 pub fn idle_loop() -> ! {
+    println!("dsljhfdslh");
     loop {
         unsafe {
             crate::interrupts::enable_and_halt();

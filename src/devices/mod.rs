@@ -3,12 +3,14 @@ use crate::paging::{self, PAGE_SIZE};
 use crate::physmem::Frame;
 use core::sync::atomic::Ordering;
 
+pub mod hpet;
 pub mod io_apic;
 pub mod local_apic;
 
 pub unsafe fn init_bsp() {
     local_apic::init_bsp();
     io_apic::init();
+    hpet::init();
 }
 
 pub unsafe fn init_ap(_cpu_id: usize) {

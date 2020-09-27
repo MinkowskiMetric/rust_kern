@@ -39,6 +39,12 @@ impl LocalApicAccess {
             while self.read(0x300) & 1 << 12 == 1 << 12 {}
         }
     }
+
+    pub fn eoi(&mut self) {
+        unsafe {
+            self.write(0xB0, 0);
+        }
+    }
 }
 
 static mut LOCAL_APIC_ACCESS: Option<LocalApicAccess> = None;

@@ -149,6 +149,7 @@ pub fn init(is_bsp: bool) {
     }
 
     idt.entries[0xf0].set_func(ipi::tlb);
+    idt.entries[0xfd].set_func(ipi::ipi_timer);
     idt.entries[0xfe].set_func(ipi::halt);
     idt.entries[0xff].set_func(irq::spurious);
 
