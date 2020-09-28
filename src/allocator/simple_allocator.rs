@@ -108,7 +108,7 @@ impl HeapRegionList {
             } else if prev_region.next.is_some() {
                 prev_region = prev_region.next.as_mut().unwrap();
             } else {
-                panic!("Failed to deallocate pointer");
+                panic!("Failed to deallocate pointer {:#x}", ptr.as_ptr() as usize);
             }
         }
     }

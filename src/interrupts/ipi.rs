@@ -12,5 +12,5 @@ interrupt!(halt, || {
 
 interrupt!(ipi_timer, || {
     crate::devices::local_apic::local_apic_access().eoi();
-    crate::println!("AP timer");
+    //crate::println!("AP timer");
 });

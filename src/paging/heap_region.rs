@@ -177,7 +177,6 @@ impl RegionManager {
             Ok(region_type)
         })
         .map(|region_info| Region::new(region_info));
-        Self::print_entries(&self.head_page);
         ret
     }
 
@@ -276,11 +275,7 @@ impl RegionManager {
             if fill_entry.region_type.is_none() {
                 break;
             } else {
-                use crate::println;
-
                 if this_page.header.next_entry.is_none() {
-                    println!("Need to allocate a new page {}", pos);
-
                     this_page.header.next_entry = Some(unsafe {
                         let new_frame = table_frame.take().expect("No table frame provided");
                         let new_page_ptr: *mut RegionMapPage =
@@ -291,7 +286,6 @@ impl RegionManager {
                     });
                 }
 
-                println!("Moving to next page");
                 this_page = this_page.header.next_entry.as_mut().unwrap();
                 pos = 0;
             }
@@ -453,24 +447,14 @@ impl RegionManager {
 
     pub fn deallocate_region(&mut self, region_info: &RegionInfo) {
         Self::deallocate_recurse_thing(&mut self.head_page, region_info);
-        Self::print_entries(&self.head_page);
     }
 
     fn deallocate_recurse_thing<'a>(
         mut this_page: &'a mut RegionMapPage,
         region_info: &RegionInfo,
     ) {
-        use crate::println;
-
         loop {
             for j in 0..REGION_MAP_ENTRIES_IN_PAGE {
-                println!(
-                    "region_info.start_va: {:#x} region: {:#x} {:?}",
-                    region_info.start_va,
-                    this_page.entries[j].base,
-                    this_page.entries[j].region_type
-                );
-
                 assert!(
                     this_page.entries[j].base <= region_info.start_va,
                     "Attempting to free invalid region"
@@ -545,14 +529,6 @@ impl RegionManager {
                         0
                     };
 
-                    println!(
-                        "Freeing region at {:#x} - {} in region {} lead {} tail",
-                        region_info.start_va,
-                        region_info.size(),
-                        lead_bytes,
-                        tail_bytes
-                    );
-
                     // The region is already unmapped at this point, so we just need to fix up the limit
                     this_page.entries[drop_region_index].base -= lead_bytes;
                     this_page.entries[drop_region_index].limit += tail_bytes;
@@ -570,11 +546,9 @@ impl RegionManager {
     }
 
     fn shuffle_entries_down(mut this_page: &mut RegionMapPage, region_index: usize) {
-        use crate::println;
         let mut pos = region_index;
         loop {
             if pos == REGION_MAP_ENTRIES_IN_PAGE - 1 {
-                println!("MOVING TO NEXT PAGE");
                 if this_page.header.next_entry.is_none() {
                     this_page.entries[pos] = RegionMapEntry::empty();
                     return;
@@ -588,7 +562,6 @@ impl RegionManager {
                     let next_page = this_page.header.next_entry.take();
                     let next_page_ref = next_page.as_ref().unwrap();
                     if let Some(frame) = next_page_ref.header.frame {
-                        println!("FREE PAGE {:#x}", frame.physical_address());
                         physmem::deallocate_frame(frame);
                     }
 
@@ -652,34 +625,6 @@ impl RegionManager {
         }
 
         flusher.flush(&mut page_table);
-    }
-
-    fn print_entries(mut this_page: &RegionMapPage) {
-        let mut pos = 0;
-        loop {
-            if pos == REGION_MAP_ENTRIES_IN_PAGE {
-                match this_page.header.next_entry.as_ref() {
-                    None => return,
-                    Some(next) => {
-                        this_page = next;
-                        pos = 0;
-                    }
-                }
-            }
-            use crate::println;
-            println!(
-                "REGION {:#x} - {:#x} {:?}",
-                this_page.entries[pos].base,
-                this_page.entries[pos].limit,
-                this_page.entries[pos].region_type
-            );
-
-            if this_page.entries[pos].region_type.is_none() {
-                return;
-            }
-
-            pos += 1;
-        }
     }
 }
 

@@ -4,6 +4,7 @@
 #![feature(asm)]
 #![feature(box_syntax)]
 #![feature(alloc_error_handler)]
+#![feature(const_btree_new)]
 #![feature(const_fn)]
 #![feature(const_in_array_repeat_expressions)]
 #![feature(const_panic)]
@@ -11,6 +12,7 @@
 #![feature(custom_test_frameworks)]
 #![feature(global_asm)]
 #![feature(maybe_uninit_extra)]
+#![feature(naked_functions)]
 #![feature(never_type)]
 #![feature(slice_fill)]
 #![feature(step_trait)]
@@ -39,8 +41,11 @@ pub mod ipi;
 pub mod mm;
 pub mod paging;
 pub mod physmem;
+pub mod scheduler;
 pub mod serial;
 pub mod vga_buffer;
+
+pub use init::cpu_id;
 
 #[cfg(test)]
 use bootloader::BootInfo;

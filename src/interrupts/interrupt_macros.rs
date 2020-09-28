@@ -67,7 +67,8 @@ macro_rules! intel_asm {
 
 #[macro_export]
 macro_rules! function {
-    ($name:ident => { $($body:expr,)+ }) => {
+    ($name:ident => { $($body:expr,)+ }) => { $crate::function!($name () => { $($body),+, }); };
+    ($name:ident ($($arg_name:ident : $arg_type:ty),*) => { $($body:expr,)+ }) => {
         $crate::intel_asm!(
             ".global ", stringify!($name), "\n",
             ".type ", stringify!($name), ", @function\n",
@@ -78,7 +79,7 @@ macro_rules! function {
             ".text\n",
         );
         extern "C" {
-            pub fn $name();
+            pub fn $name($($arg_name : $arg_type),*);
         }
     };
 }
