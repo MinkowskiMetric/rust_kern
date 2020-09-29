@@ -141,6 +141,7 @@ pub unsafe fn kstart_ap(cpu_id: usize, idle_thread_stack: paging::KernelStack) -
 }
 
 fn userland_init(func: impl FnOnce() -> ! + 'static) -> ! {
+    println!("Running in userland_init");
     func()
 }
 

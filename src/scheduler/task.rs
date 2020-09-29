@@ -123,8 +123,15 @@ impl TaskDirectoryData {
     ) -> Option<Box<TaskControl>> {
         let min_priority_index = current_priority.map(|pri| pri as usize).unwrap_or(0);
         for priority_index in (min_priority_index..PRIORITIES_COUNT).rev() {
-            if let Some(task) = self.ready_lists[priority_index].pop_front() {
-                return Some(task);
+            let mut pos = self.ready_lists[priority_index].front_mut();
+            while !pos.is_null() {
+                let this_cpu = crate::cpu_id();
+                let affinity_cpu = pos.get().unwrap().task().inner.read().init.cpu_id.unwrap_or(this_cpu);
+                if this_cpu == affinity_cpu {
+                    return Some(pos.remove().unwrap());
+                } else {
+                    pos.move_next();
+                }
             }
         }
 
@@ -169,7 +176,7 @@ pub static TASK_DIRECTORY: TaskDirectory = TaskDirectory::new();
 pub struct TaskInit {
     _flags: TaskFlags,
     kernel_stack: paging::KernelStack,
-    _cpu_id: Option<usize>,
+    cpu_id: Option<usize>,
     priority: TaskPriority,
 }
 
@@ -232,7 +239,7 @@ impl Task {
             TaskInit {
                 _flags: TaskFlags::NO_TERMINATE,
                 kernel_stack: kernel_stack,
-                _cpu_id: Some(cpu_id),
+                cpu_id: Some(cpu_id),
                 priority: TaskPriority::Idle,
             },
         )
@@ -246,7 +253,7 @@ impl Task {
             TaskInit {
                 _flags: TaskFlags::empty(),
                 kernel_stack,
-                _cpu_id: None,
+                cpu_id: None,
                 priority: TaskPriority::Normal,
             },
         )
