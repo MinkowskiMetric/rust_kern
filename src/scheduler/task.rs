@@ -48,7 +48,7 @@ impl TaskDirectoryData {
     const fn new() -> Self {
         Self {
             process_map: BTreeMap::new(),
-            ready_lists: [LinkedList::new(TaskListAdapter::NEW); PRIORITIES_COUNT],
+            ready_lists: [LinkedList::new(TaskListAdapter::NEW), LinkedList::new(TaskListAdapter::NEW)],
             next_pid: 0,
             next_system_pid: 0xffff_ffff_ffff_ffff,
         }

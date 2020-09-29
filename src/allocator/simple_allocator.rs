@@ -19,7 +19,7 @@ struct HeapRegionList {
 }
 
 impl HeapRegionList {
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             head: HeapRegion {
                 payload: None,
